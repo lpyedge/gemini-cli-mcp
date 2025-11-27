@@ -1,0 +1,144 @@
+{
+  "name": "gemini-cli-mcp",
+  "publisher": "lpyedge",
+  "version": "0.2.1",
+  "private": true,
+  "displayName": "Gemini CLI MCP",
+  "description": "VS Code MCP plugin that lets GitHub Copilot orchestrate local Gemini CLI workers for repetitive automation tasks.",
+  "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/google/gemini-mcp-extension.git"
+  },
+  "scripts": {
+    "typecheck": "tsc -p . --noEmit && tsc -p server --noEmit",
+    "bundle": "node scripts/bundle.mjs",
+    "compile": "npm run typecheck && npm run bundle",
+    "watch": "node scripts/bundle.mjs --watch",
+    "package": "npm run compile && node -e \"require('fs').mkdirSync('dist',{recursive:true});\" && vsce package --out dist/gemini-cli-mcp.vsix"
+  },
+  "engines": {
+    "vscode": ">=1.105.0"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:geminiMcp.tasks"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Gemini CLI MCP",
+      "properties": {
+        "geminiMcp.geminiPath": {
+          "type": "string",
+          "default": "gemini",
+          "description": "Absolute or PATH-resolvable command for Gemini CLI workers."
+        },
+        "geminiMcp.maxWorkers": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Maximum number of concurrent Gemini CLI worker processes."
+        },
+        "geminiMcp.taskCwd": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Working directory to launch Gemini tasks from (defaults to the first workspace folder)."
+        },
+        "geminiMcp.maxQueue": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "description": "Maximum queued Gemini worker tasks before rejecting new submissions."
+        },
+        "geminiMcp.defaultTimeouts.testsRun": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 0,
+          "description": "Default timeout (ms) for the tests.run tool when none is provided."
+        },
+        "geminiMcp.defaultTimeouts.codeAnalyze": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 0,
+          "description": "Default timeout (ms) for the code.analyze tool when none is provided."
+        },
+        "geminiMcp.defaultTimeouts.codeFormat": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 0,
+          "description": "Default timeout (ms) for the code.format.batch tool when none is provided."
+        },
+        "geminiMcp.defaultTimeouts.taskSubmit": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Default timeout (ms) for gemini.task.submit jobs (0 disables the timeout)."
+        },
+        "geminiMcp.defaultPriorities.testsRun": {
+          "type": "number",
+          "default": 0,
+          "minimum": -5,
+          "maximum": 5,
+          "description": "Default queue priority for tests.run tasks when the caller omits it."
+        },
+        "geminiMcp.defaultPriorities.codeAnalyze": {
+          "type": "number",
+          "default": 0,
+          "minimum": -5,
+          "maximum": 5,
+          "description": "Default queue priority for code.analyze tasks when the caller omits it."
+        },
+        "geminiMcp.defaultPriorities.codeFormat": {
+          "type": "number",
+          "default": 0,
+          "minimum": -5,
+          "maximum": 5,
+          "description": "Default queue priority for code.format.batch tasks when the caller omits it."
+        },
+        "geminiMcp.defaultPriorities.taskSubmit": {
+          "type": "number",
+          "default": 0,
+          "minimum": -5,
+          "maximum": 5,
+          "description": "Default queue priority for gemini.task.submit tasks when the caller omits it."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "geminiMcp.tasks",
+          "name": "Gemini CLI MCP Tasks"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "gemini-mcp-provider",
+        "label": "Gemini CLI MCP"
+      }
+    ],
+    "commands": [
+      {
+        "command": "geminiMcp.showStatus",
+        "title": "Gemini CLI MCP: Show Worker Status"
+      },
+      {
+        "command": "geminiMcp.openTaskLog",
+        "title": "Gemini CLI MCP: Open Task Log"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/vscode": "^1.105.0",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.27.0",
+    "typescript": "^5.6.3",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.1.2",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,51 @@
+name: Publish VS Code Extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to build and publish (e.g. v0.2.1)
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    env:
+      VSCE_TOKEN: ${{ secrets.VSCE_TOKEN }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Ensure VSCE token is configured
+        if: env.VSCE_TOKEN == ''
+        run: |
+          echo "VSCE_TOKEN secret is not configured. Please add it in the repository settings."
+          exit 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package extension
+        run: npm run package
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-cli-mcp
+          path: dist/gemini-cli-mcp.vsix
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ env.VSCE_TOKEN }}
+        run: npx vsce publish --packagePath dist/gemini-cli-mcp.vsix

@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "gemini-cli-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["server/dist/index.js"],
+      "env": {
+        "GEMINI_CLI": "gemini",
+        "GEMINI_MAX_WORKERS": "3",
+        "GEMINI_TASK_CWD": "${workspaceFolder}",
+        "GEMINI_MAX_QUEUE": "200"
+      }
+    }
+  }
+}
