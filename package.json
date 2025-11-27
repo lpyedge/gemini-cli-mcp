@@ -8,7 +8,7 @@
   "main": "./dist/extension.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/google/gemini-mcp-extension.git"
+    "url": "https://github.com/lpyedge/gemini-cli-mcp.git"
   },
   "scripts": {
     "typecheck": "tsc -p . --noEmit && tsc -p server --noEmit",
