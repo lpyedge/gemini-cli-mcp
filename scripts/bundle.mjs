@@ -17,14 +17,14 @@ const targets = [
   },
   {
     name: 'server',
-    entry: path.join(projectRoot, 'server', 'src', 'index.ts'),
+    entry: path.join(projectRoot, 'server', 'src', 'server', 'index.ts'),
     outfile: path.join(projectRoot, 'server', 'dist', 'index.js'),
     external: []
   }
   ,
   {
     name: 'spawnHelpers',
-    entry: path.join(projectRoot, 'server', 'src', 'spawnHelpers.ts'),
+    entry: path.join(projectRoot, 'server', 'src', 'gemini', 'spawnHelpers.ts'),
     outfile: path.join(projectRoot, 'server', 'dist', 'spawnHelpers.js'),
     external: []
   }

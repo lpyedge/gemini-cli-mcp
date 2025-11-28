@@ -8,15 +8,15 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { WorkerPool } from './workerPool.js';
-import { terminateProcessTree, execGeminiCommand } from './processUtils.js';
-import { buildSpawnCommand, setGeminiBin, geminiBin } from './spawnHelpers.js';
-import { SILENT_EXEC_PROMPT, StructuredError, serializeErrorForClient, tokenizeCommandLine, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv, readPriorityEnv } from './utils.js';
-import { createPersistenceManager } from './persistenceManager.js';
-export { buildSpawnCommand, setGeminiBin } from './spawnHelpers.js';
-import { TaskRecord, TaskStatus } from './types.js';
+import { WorkerPool } from '../task/workerPool.js';
+import { terminateProcessTree, execGeminiCommand } from '../gemini/processUtils.js';
+import { buildSpawnCommand, setGeminiBin, geminiBin } from '../gemini/spawnHelpers.js';
+import { SILENT_EXEC_PROMPT, StructuredError, serializeErrorForClient, tokenizeCommandLine, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv, readPriorityEnv } from '../core/utils.js';
+import { createPersistenceManager } from '../task/persistenceManager.js';
+export { buildSpawnCommand, setGeminiBin } from '../gemini/spawnHelpers.js';
+import { TaskRecord, TaskStatus } from '../task/types.js';
 
-// geminiBin and related helpers are provided by server/src/spawnHelpers.ts
+// geminiBin and related helpers are provided by server/src/gemini/spawnHelpers.ts
 const workerCount = Number(process.env.GEMINI_MAX_WORKERS || '3');
 let rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
 if (!rawWorkspaceRootEnv) {
@@ -736,7 +736,7 @@ function normalizeTemplateVariable(value?: string | string[]) {
     return Array.isArray(value) ? value[0] : value;
 }
 
-// `tokenizeCommandLine` moved to `server/src/utils.ts`
+// `tokenizeCommandLine` moved to `server/src/core/utils.ts`
 
 function ensureQueueCapacity() {
     if (pool.queuedCount() >= maxQueueSize) {
@@ -830,9 +830,9 @@ function assertAllowedTaskCwd(target: string) {
     throw new Error('Task working directory must be within workspace, user home, or system temp.');
 }
 
-// `normalizeForComparison` moved to `server/src/utils.ts`
+// `normalizeForComparison` moved to `server/src/core/utils.ts`
 
-// `resolveWorkspaceRoot` moved to `server/src/utils.ts`
+// `resolveWorkspaceRoot` moved to `server/src/core/utils.ts`
 
 async function ensureStateDirs() {
     await fs.mkdir(logDir, { recursive: true });
@@ -894,7 +894,7 @@ async function updateLogLength(task: TaskRecord) {
     }
 }
 
-// terminateProcessTree moved to server/src/processUtils.ts
+// terminateProcessTree moved to server/src/gemini/processUtils.ts
 
 // Persistence responsibilities moved to `persistenceManager`
 
@@ -1054,7 +1054,7 @@ async function buildSuggestions(limit: number) {
     return suggestions.slice(0, limit);
 }
 
-// `formatWorkspaceError` moved to `server/src/utils.ts`
+// `formatWorkspaceError` moved to `server/src/core/utils.ts`
 
 async function validateGeminiExecutable() {
     if (geminiBin.includes(path.sep)) {
@@ -1068,7 +1068,7 @@ async function validateGeminiExecutable() {
 
 // spawnHelpers provides gemini resolution and spawn command helpers
 
-// execGeminiCommand moved to server/src/processUtils.ts
+// execGeminiCommand moved to server/src/gemini/processUtils.ts
 
 async function updateCliStatus(reason: string) {
     if (cliCheckPromise) {
@@ -1198,7 +1198,7 @@ function stopCliHealthWatcher() {
     // Nothing to stop; watcher is disabled.
 }
 
-// `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/utils.ts`
+// `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/core/utils.ts`
 
 async function start() {
     await validateGeminiExecutable();
@@ -1222,3 +1222,5 @@ if (!process.env.GEMINI_MCP_SKIP_START) {
         process.exit(1);
     });
 }
+
+export { server };
