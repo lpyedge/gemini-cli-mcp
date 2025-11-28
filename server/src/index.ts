@@ -13,7 +13,12 @@ import { TaskRecord, TaskStatus } from './types.js';
 
 const geminiBin = resolveGeminiBinary(process.env.GEMINI_CLI || 'gemini');
 const workerCount = Number(process.env.GEMINI_MAX_WORKERS || '3');
-const workspaceRoot = resolveWorkspaceRoot(process.env.GEMINI_TASK_CWD || process.cwd());
+const rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
+if (!rawWorkspaceRootEnv) {
+    console.error('Gemini CLI MCP server requires GEMINI_TASK_CWD to be set.');
+    process.exit(1);
+}
+const workspaceRoot = resolveWorkspaceRoot(rawWorkspaceRootEnv);
 const stateDir = path.join(workspaceRoot, '.vscode', 'gemini-mcp');
 const logDir = path.join(stateDir, 'logs');
 const stateFile = path.join(stateDir, 'tasks.json');
@@ -32,7 +37,6 @@ const LIVE_STATUS_LIMIT = 200;
 let persistTimer: NodeJS.Timeout | undefined;
 let statusPersistTimer: NodeJS.Timeout | undefined;
 let shuttingDown = false;
-const CLI_HEALTH_INTERVAL_MS = 5 * 60 * 1000;
 type CliHealthState = 'unknown' | 'ok' | 'missing' | 'quota_exhausted' | 'error';
 interface CliStatusSnapshot {
     state: CliHealthState;
@@ -45,7 +49,6 @@ let cliStatus: CliStatusSnapshot = {
     message: 'Gemini CLI health check pending.',
     lastChecked: Date.now()
 };
-let cliHealthTimer: NodeJS.Timeout | undefined;
 let cliCheckPromise: Promise<void> | undefined;
 const allowedCwdRoots = [workspaceRoot, os.tmpdir(), os.homedir()].map((p) => path.normalize(p));
 const defaultTimeouts: Record<string, number> = {
@@ -415,7 +418,10 @@ server.registerTool(
                 }
             }
             const resolvedSubcommand = subcommand ?? 'code';
-            const command = resolvedSubcommand.split(' ');
+            const command = tokenizeCommandLine(resolvedSubcommand);
+            if (command.length === 0) {
+                throw new Error('Gemini code.analyze subcommand cannot be empty.');
+            }
             const effectiveTimeout =
                 timeoutMs ?? defaultTimeouts['code.analyze'] ?? undefined;
             const resolvedPriority = priority ?? defaultPriorities['code.analyze'];
@@ -498,7 +504,11 @@ server.registerTool(
                     buffer.push(`\n--- FILE: ${rel} (unreadable) ---\n${formatWorkspaceError(error)}`);
                 }
             }
-            const command = [...resolvedFormatter.split(' '), ...(extraArgs ?? [])];
+            const formatterTokens = tokenizeCommandLine(resolvedFormatter);
+            if (formatterTokens.length === 0) {
+                throw new Error('code.format.batch formatter command cannot be empty.');
+            }
+            const command = [...formatterTokens, ...(extraArgs ?? [])];
             const effectiveTimeout =
                 timeoutMs ?? defaultTimeouts['code.format.batch'] ?? undefined;
             const resolvedPriority = priority ?? defaultPriorities['code.format.batch'];
@@ -692,6 +702,55 @@ function normalizeTemplateVariable(value?: string | string[]) {
         return undefined;
     }
     return Array.isArray(value) ? value[0] : value;
+}
+
+function tokenizeCommandLine(input: string) {
+    const tokens: string[] = [];
+    let current = '';
+    let quote: '"' | "'" | undefined;
+    let escaping = false;
+    for (let i = 0; i < input.length; i += 1) {
+        const char = input[i];
+        if (quote) {
+            if (escaping) {
+                current += char;
+                escaping = false;
+                continue;
+            }
+            if (char === '\\') {
+                escaping = true;
+                continue;
+            }
+            if (char === quote) {
+                quote = undefined;
+                continue;
+            }
+            current += char;
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+        }
+        if (/\s/.test(char)) {
+            if (current.length > 0) {
+                tokens.push(current);
+                current = '';
+            }
+            continue;
+        }
+        current += char;
+    }
+    if (escaping) {
+        current += '\\';
+    }
+    if (quote) {
+        throw new Error('Unterminated quoted argument in formatter or subcommand.');
+    }
+    if (current.length > 0) {
+        tokens.push(current);
+    }
+    return tokens;
 }
 
 function ensureQueueCapacity() {
@@ -1324,14 +1383,11 @@ function ensureCliReady() {
 }
 
 function startCliHealthWatcher() {
-    // Disabled periodic watcher to avoid unnecessary background churn; we refresh on startup and on errors.
+    // Disable periodic polling to avoid hammering gemini --version.
 }
 
 function stopCliHealthWatcher() {
-    if (cliHealthTimer) {
-        clearInterval(cliHealthTimer);
-        cliHealthTimer = undefined;
-    }
+    // Nothing to stop; watcher is disabled.
 }
 
 function readTimeoutEnv(name: string, fallback: number) {

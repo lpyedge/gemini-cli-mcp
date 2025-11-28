@@ -228,6 +228,8 @@ function resolveTaskCwd(raw: string | undefined): string | undefined {
     return undefined;
 }
 
+let workspaceWarningShown = false;
+
 export function activate(context: vscode.ExtensionContext) {
     const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusItem.name = 'Gemini CLI MCP';
@@ -252,6 +254,11 @@ export function activate(context: vscode.ExtensionContext) {
     const providerEmitter = new vscode.EventEmitter<void>();
     context.subscriptions.push(providerEmitter);
     context.subscriptions.push(cliHealth.onDidChange(() => providerEmitter.fire()));
+    const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        workspaceWarningShown = false;
+        providerEmitter.fire();
+    });
+    context.subscriptions.push(workspaceWatcher);
 
     const provider = vscode.lm.registerMcpServerDefinitionProvider('gemini-mcp-provider', {
         onDidChangeMcpServerDefinitions: providerEmitter.event,
@@ -265,10 +272,19 @@ export function activate(context: vscode.ExtensionContext) {
             const serverCwd = vscode.Uri.joinPath(context.extensionUri, 'server').fsPath;
             const args = ['dist/index.js'];
             const resolvedTaskCwd = resolveTaskCwd(cfg.taskCwd);
+            if (!resolvedTaskCwd) {
+                if (!workspaceWarningShown) {
+                    workspaceWarningShown = true;
+                    void vscode.window.showWarningMessage(
+                        'Gemini CLI MCP requires an open workspace or an absolute taskCwd before it can run.'
+                    );
+                }
+                return servers;
+            }
             const env = {
                 GEMINI_CLI: cfg.geminiPath,
                 GEMINI_MAX_WORKERS: String(Math.max(1, cfg.maxWorkers)),
-                GEMINI_TASK_CWD: resolvedTaskCwd ?? '',
+                GEMINI_TASK_CWD: resolvedTaskCwd,
                 GEMINI_MAX_QUEUE: String(Math.max(1, cfg.maxQueue)),
                 GEMINI_TIMEOUT_TESTS_RUN: String(Math.max(0, cfg.defaultTimeouts.testsRun)),
                 GEMINI_TIMEOUT_CODE_ANALYZE: String(Math.max(0, cfg.defaultTimeouts.codeAnalyze)),
@@ -301,6 +317,7 @@ export function activate(context: vscode.ExtensionContext) {
             const cfg = readConfig();
             statusMonitor.updateConfig(cfg);
             void cliHealth.refresh(cfg);
+            workspaceWarningShown = false;
             vscode.window.showInformationMessage('Gemini CLI MCP config updated; server will reload shortly');
         }
     });
