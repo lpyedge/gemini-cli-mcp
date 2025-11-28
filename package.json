@@ -102,6 +102,13 @@
           "maximum": 5,
           "description": "Default queue priority for gemini.task.submit tasks when the caller omits it."
         }
+      ,
+      "geminiMcp.unhealthyStates": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["missing", "quota_exhausted", "unresponsive"],
+        "description": "Which Gemini CLI health states should mark the extension as unhealthy (red). Values can include 'missing', 'quota_exhausted', 'unresponsive', or 'error'. Default includes 'missing','quota_exhausted','unresponsive' so missing CLI, quota exhaustion, or service/unresponsive errors show a red state while other transient warnings do not."
+      }
       }
     },
     "views": {

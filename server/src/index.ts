@@ -9,16 +9,23 @@ import { z } from 'zod';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WorkerPool } from './workerPool.js';
+import { terminateProcessTree, execGeminiCommand } from './processUtils.js';
+import { buildSpawnCommand, setGeminiBin, geminiBin } from './spawnHelpers.js';
+import { SILENT_EXEC_PROMPT, StructuredError, serializeErrorForClient, tokenizeCommandLine, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv, readPriorityEnv } from './utils.js';
+import { createPersistenceManager } from './persistenceManager.js';
+export { buildSpawnCommand, setGeminiBin } from './spawnHelpers.js';
 import { TaskRecord, TaskStatus } from './types.js';
 
-const geminiBin = resolveGeminiBinary(
-    (process.env.GEMINI_CLI ?? '').trim() || autoDiscoverGeminiBinary() || 'gemini'
-);
+// geminiBin and related helpers are provided by server/src/spawnHelpers.ts
 const workerCount = Number(process.env.GEMINI_MAX_WORKERS || '3');
-const rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
+let rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
 if (!rawWorkspaceRootEnv) {
-    console.error('Gemini CLI MCP server requires GEMINI_TASK_CWD to be set.');
-    process.exit(1);
+    if (!process.env.GEMINI_MCP_SKIP_START) {
+        console.error('Gemini CLI MCP server requires GEMINI_TASK_CWD to be set.');
+        process.exit(1);
+    }
+    // When running tests we allow skipping the startup checks; use temp dir as workspaceRoot.
+    rawWorkspaceRootEnv = os.tmpdir();
 }
 const workspaceRoot = resolveWorkspaceRoot(rawWorkspaceRootEnv);
 const stateDir = path.join(workspaceRoot, '.vscode', 'gemini-mcp');
@@ -39,7 +46,7 @@ const LIVE_STATUS_LIMIT = 200;
 let persistTimer: NodeJS.Timeout | undefined;
 let statusPersistTimer: NodeJS.Timeout | undefined;
 let shuttingDown = false;
-type CliHealthState = 'unknown' | 'ok' | 'missing' | 'quota_exhausted' | 'error';
+type CliHealthState = 'unknown' | 'ok' | 'missing' | 'quota_exhausted' | 'unresponsive' | 'error';
 interface CliStatusSnapshot {
     state: CliHealthState;
     message: string;
@@ -69,8 +76,20 @@ const defaultPriorities: Record<string, number> = {
 
 const tasks = new Map<string, TaskRecord>();
 const taskEvents = new EventEmitter();
-taskEvents.on('update', () => scheduleStatusSnapshot());
 const pool = new WorkerPool(workerCount);
+
+const persistence = createPersistenceManager({
+    tasks,
+    taskEvents,
+    stateFile,
+    statusFile,
+    logDir,
+    retentionMs,
+    PERSIST_DEBOUNCE_MS,
+    LIVE_STATUS_LIMIT,
+    pool,
+    workerCount
+});
 
 const server = new McpServer({
     name: 'gemini-cli-mcp',
@@ -243,7 +262,7 @@ server.registerTool(
             );
             return textResponse(taskResponse(task.id, task.status, task.logLength));
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -301,7 +320,7 @@ server.registerTool(
     },
     async ({ olderThanDays = 7 }, _extra) => {
         const windowMs = olderThanDays * 24 * 60 * 60 * 1000;
-        const result = await pruneOldTasks(windowMs);
+        const result = await persistence.pruneOldTasks(windowMs);
         return textResponse({
             prunedTasks: result.removedTasks,
             prunedLogs: result.removedLogs,
@@ -374,7 +393,7 @@ server.registerTool(
             const data = await fs.readFile(target, 'utf8');
             return textResponse(data);
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -393,7 +412,7 @@ server.registerTool(
             await fs.writeFile(target, contents, 'utf8');
             return textResponse({ ok: true, file });
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -442,7 +461,7 @@ server.registerTool(
             );
             return textResponse(taskResponse(task.id, task.status, task.logLength));
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -479,7 +498,7 @@ server.registerTool(
             );
             return textResponse(taskResponse(task.id, task.status, task.logLength));
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -534,7 +553,7 @@ server.registerTool(
             );
             return textResponse(taskResponse(task.id, task.status, task.logLength));
         } catch (error) {
-            return textResponse({ error: formatWorkspaceError(error) });
+            return textResponse({ error: serializeErrorForClient(error) });
         }
     }
 );
@@ -583,8 +602,13 @@ async function createTask(
     };
     tasks.set(id, task);
     taskEvents.emit('update', task);
-    schedulePersist();
-    enqueueCliTask(task, stdinText);
+    persistence.schedulePersist();
+    // Inject a short instruction prompting the agent to run silently and
+    // avoid spawning new terminal windows. This is a lightweight mitigation
+    // that asks Gemini to keep subsequent calls non-interactive; it cannot
+    // fully guarantee behavior but reduces accidental external windows.
+    const injectedStdin = stdinText ? `${SILENT_EXEC_PROMPT}\n${stdinText}` : `${SILENT_EXEC_PROMPT}\n`;
+    enqueueCliTask(task, injectedStdin);
     return task;
 }
 
@@ -608,7 +632,10 @@ function enqueueCliTask(task: TaskRecord, stdinText?: string) {
         const child = spawn(command, args, {
             cwd: task.cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
-            detached: true
+            // Keep child in the same process group where possible so termination
+            // of the parent/child tree is more reliable across platforms.
+            detached: false,
+            windowsHide: process.platform === 'win32'
         });
 
         const timeoutTimer = task.timeoutMs
@@ -709,58 +736,11 @@ function normalizeTemplateVariable(value?: string | string[]) {
     return Array.isArray(value) ? value[0] : value;
 }
 
-function tokenizeCommandLine(input: string) {
-    const tokens: string[] = [];
-    let current = '';
-    let quote: '"' | "'" | undefined;
-    let escaping = false;
-    for (let i = 0; i < input.length; i += 1) {
-        const char = input[i];
-        if (quote) {
-            if (escaping) {
-                current += char;
-                escaping = false;
-                continue;
-            }
-            if (char === '\\') {
-                escaping = true;
-                continue;
-            }
-            if (char === quote) {
-                quote = undefined;
-                continue;
-            }
-            current += char;
-            continue;
-        }
-        if (char === '"' || char === "'") {
-            quote = char;
-            continue;
-        }
-        if (/\s/.test(char)) {
-            if (current.length > 0) {
-                tokens.push(current);
-                current = '';
-            }
-            continue;
-        }
-        current += char;
-    }
-    if (escaping) {
-        current += '\\';
-    }
-    if (quote) {
-        throw new Error('Unterminated quoted argument in formatter or subcommand.');
-    }
-    if (current.length > 0) {
-        tokens.push(current);
-    }
-    return tokens;
-}
+// `tokenizeCommandLine` moved to `server/src/utils.ts`
 
 function ensureQueueCapacity() {
     if (pool.queuedCount() >= maxQueueSize) {
-        throw new Error(`Queue is full (limit ${maxQueueSize}). Try again later.`);
+        throw new StructuredError('QUEUE_FULL', `Queue is full (limit ${maxQueueSize}). Try again later.`);
     }
 }
 
@@ -780,7 +760,7 @@ function appendLog(task: TaskRecord, chunk: string) {
     updateLastLogLine(task, chunk);
     taskEvents.emit('update', task);
     void appendLogToFile(task.logFile, chunk);
-    schedulePersist();
+    persistence.schedulePersist();
 }
 
 function updateLastLogLine(task: TaskRecord, chunk: string) {
@@ -813,9 +793,9 @@ function markTaskStatus(task: TaskRecord, status: TaskStatus, error?: string) {
     }
     task.updatedAt = Date.now();
     taskEvents.emit('update', task);
-    schedulePersist();
+    persistence.schedulePersist();
     if (completedStatuses.includes(status)) {
-        void pruneOldTasks(retentionMs);
+        void persistence.pruneOldTasks(retentionMs);
     }
 }
 
@@ -850,13 +830,9 @@ function assertAllowedTaskCwd(target: string) {
     throw new Error('Task working directory must be within workspace, user home, or system temp.');
 }
 
-function normalizeForComparison(target: string) {
-    return path.normalize(target).toLowerCase();
-}
+// `normalizeForComparison` moved to `server/src/utils.ts`
 
-function resolveWorkspaceRoot(input: string) {
-    return path.isAbsolute(input) ? path.normalize(input) : path.resolve(process.cwd(), input);
-}
+// `resolveWorkspaceRoot` moved to `server/src/utils.ts`
 
 async function ensureStateDirs() {
     await fs.mkdir(logDir, { recursive: true });
@@ -918,160 +894,9 @@ async function updateLogLength(task: TaskRecord) {
     }
 }
 
-function terminateProcessTree(child: ChildProcess) {
-    const pid = child.pid;
-    if (!pid) {
-        child.kill();
-        return;
-    }
-    if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', pid.toString(), '/t', '/f']);
-    } else {
-        try {
-            process.kill(-pid, 'SIGTERM');
-        } catch {
-            // ignore
-        }
-        child.kill();
-    }
-}
+// terminateProcessTree moved to server/src/processUtils.ts
 
-async function persistTasks() {
-    await ensureStateDirs();
-    const payload = Array.from(tasks.values()).map((task) => {
-        const { log, ...rest } = task;
-        return rest;
-    });
-    await fs.writeFile(stateFile, JSON.stringify(payload, null, 2), 'utf8');
-}
-
-function schedulePersist() {
-    if (persistTimer) {
-        clearTimeout(persistTimer);
-    }
-    persistTimer = setTimeout(() => {
-        persistTimer = undefined;
-        persistTasks().catch((error) => console.error('Failed to persist Gemini CLI MCP task state', error));
-    }, PERSIST_DEBOUNCE_MS);
-}
-
-function scheduleStatusSnapshot() {
-    if (statusPersistTimer) {
-        clearTimeout(statusPersistTimer);
-    }
-    statusPersistTimer = setTimeout(() => {
-        statusPersistTimer = undefined;
-        persistLiveStatus().catch((error) => console.error('Failed to persist Gemini CLI MCP live status', error));
-    }, PERSIST_DEBOUNCE_MS);
-}
-
-async function persistLiveStatus() {
-    await ensureStateDirs();
-    const payload = buildLiveStatusPayload();
-    await fs.writeFile(statusFile, JSON.stringify(payload, null, 2), 'utf8');
-}
-
-async function flushPendingPersistence() {
-    if (persistTimer) {
-        clearTimeout(persistTimer);
-        persistTimer = undefined;
-        await persistTasks();
-    }
-    if (statusPersistTimer) {
-        clearTimeout(statusPersistTimer);
-        statusPersistTimer = undefined;
-        await persistLiveStatus();
-    }
-}
-
-function buildLiveStatusPayload() {
-    const snapshotTasks = Array.from(tasks.values())
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, LIVE_STATUS_LIMIT)
-        .map((task) => ({
-            id: task.id,
-            toolName: task.toolName,
-            status: task.status,
-            createdAt: task.createdAt,
-            startedAt: task.startedAt,
-            updatedAt: task.updatedAt,
-            completedAt: task.completedAt,
-            lastLogLine: task.lastLogLine,
-            priority: task.priority
-        }));
-    return {
-        updatedAt: Date.now(),
-        running: pool.runningCount(),
-        queued: pool.queuedCount(),
-        maxWorkers: workerCount,
-        queueLimit: maxQueueSize,
-        cliStatus,
-        tasks: snapshotTasks
-    };
-}
-
-async function loadPersistedTasks() {
-    try {
-        const raw = await fs.readFile(stateFile, 'utf8');
-        const saved: TaskRecord[] = JSON.parse(raw);
-        await ensureStateDirs();
-        for (const record of saved) {
-            record.logFile = record.logFile ?? path.join(logDir, `${record.id}.log`);
-            try {
-                record.cwd = assertAllowedTaskCwd(record.cwd);
-            } catch (error) {
-                record.status = 'failed';
-                record.error = formatWorkspaceError(error);
-            }
-            if (record.log && record.log.length > 0 && !(await fileExists(record.logFile))) {
-                const buffer = record.log.join('');
-                await fs.writeFile(record.logFile, buffer, 'utf8');
-                record.logLength = Buffer.byteLength(buffer, 'utf8');
-            } else if (await fileExists(record.logFile)) {
-                const stat = await fs.stat(record.logFile);
-                record.logLength = stat.size;
-            } else {
-                record.logLength = record.logLength ?? 0;
-            }
-            record.log = undefined;
-            if (!completedStatuses.includes(record.status)) {
-                record.status = 'failed';
-                record.error = 'Server restarted while task was running.';
-                record.updatedAt = Date.now();
-                record.completedAt = record.completedAt ?? Date.now();
-            }
-            record.jobId = undefined;
-            tasks.set(record.id, record);
-        }
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            console.error('Failed to load Gemini CLI MCP task state', error);
-        }
-    }
-}
-
-async function pruneOldTasks(olderThanMs = retentionMs) {
-    const cutoff = Date.now() - olderThanMs;
-    let removedTasks = 0;
-    let removedLogs = 0;
-    for (const [id, task] of Array.from(tasks.entries())) {
-        if (completedStatuses.includes(task.status) && task.updatedAt < cutoff) {
-            tasks.delete(id);
-            removedTasks += 1;
-            try {
-                await fs.rm(task.logFile, { force: true });
-                removedLogs += 1;
-            } catch {
-                // ignore
-            }
-        }
-    }
-    if (removedTasks > 0) {
-        schedulePersist();
-        scheduleStatusSnapshot();
-    }
-    return { removedTasks, removedLogs, cutoff };
-}
+// Persistence responsibilities moved to `persistenceManager`
 
 async function handleShutdown(reason: string) {
     if (shuttingDown) {
@@ -1087,7 +912,7 @@ async function handleShutdown(reason: string) {
                 markTaskStatus(task, 'failed', reason);
             }
         }
-        await flushPendingPersistence();
+        await persistence.flushPendingPersistence();
     } catch (error) {
         console.error('Failed to flush tasks during shutdown', error);
     }
@@ -1229,9 +1054,7 @@ async function buildSuggestions(limit: number) {
     return suggestions.slice(0, limit);
 }
 
-function formatWorkspaceError(error: unknown) {
-    return error instanceof Error ? error.message : String(error);
-}
+// `formatWorkspaceError` moved to `server/src/utils.ts`
 
 async function validateGeminiExecutable() {
     if (geminiBin.includes(path.sep)) {
@@ -1243,149 +1066,9 @@ async function validateGeminiExecutable() {
     }
 }
 
-function autoDiscoverGeminiBinary() {
-    if (process.platform !== 'win32') {
-        return undefined;
-    }
-    const fromCommonPaths = findGeminiInCommonPaths();
-    if (fromCommonPaths) {
-        console.log(`Gemini CLI auto-detected at ${fromCommonPaths}`);
-        return fromCommonPaths;
-    }
-    const fromWhere = findGeminiViaWhere();
-    if (fromWhere) {
-        console.log(`Gemini CLI located via 'where': ${fromWhere}`);
-        return fromWhere;
-    }
-    return undefined;
-}
+// spawnHelpers provides gemini resolution and spawn command helpers
 
-function findGeminiInCommonPaths() {
-    const candidates: string[] = [];
-    const localApp = process.env.LOCALAPPDATA;
-    const programFiles = process.env.ProgramFiles;
-    const programFilesX86 = process.env['ProgramFiles(x86)'];
-    const userProfile = process.env.USERPROFILE;
-    const baseDirs = [localApp, programFiles, programFilesX86, userProfile].filter(
-        (dir): dir is string => !!dir && dir.trim().length > 0
-    );
-    const subPaths = [
-        ['Programs', 'Gemini CLI'],
-        ['Google', 'Gemini CLI'],
-        ['Gemini CLI'],
-        ['AppData', 'Local', 'Gemini CLI']
-    ];
-    const fileNames = ['gemini.exe', 'gemini.cmd', path.join('bin', 'gemini.exe'), path.join('bin', 'gemini.cmd')];
-    for (const base of baseDirs) {
-        for (const sub of subPaths) {
-            const root = path.join(base, ...sub);
-            for (const file of fileNames) {
-                candidates.push(path.join(root, file));
-            }
-        }
-    }
-    for (const candidate of candidates) {
-        if (candidate && fsSync.existsSync(candidate)) {
-            return candidate;
-        }
-    }
-    return undefined;
-}
-
-function findGeminiViaWhere() {
-    try {
-        const result = spawnSync('where', ['gemini'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-        if (result.status !== 0) {
-            return undefined;
-        }
-        const lines = (result.stdout || '')
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0 && fsSync.existsSync(line));
-        if (lines.length === 0) {
-            return undefined;
-        }
-        const exe = lines.find((line) => line.toLowerCase().endsWith('.exe'));
-        if (exe) {
-            return exe;
-        }
-        const cmd = lines.find((line) => line.toLowerCase().endsWith('.cmd') || line.toLowerCase().endsWith('.bat'));
-        return cmd ?? lines[0];
-    } catch {
-        return undefined;
-    }
-}
-
-function resolveGeminiBinary(raw: string) {
-    if (process.platform === 'win32') {
-        const hasSeparator = raw.includes(path.sep);
-        const ext = path.extname(raw).toLowerCase();
-        if (hasSeparator && !ext) {
-            const withCmd = `${raw}.cmd`;
-            const withExe = `${raw}.exe`;
-            if (fsSync.existsSync(withCmd)) {
-                return withCmd;
-            }
-            if (fsSync.existsSync(withExe)) {
-                return withExe;
-            }
-        }
-    }
-    return raw;
-}
-
-function buildSpawnCommand(taskArgs: string[]) {
-    if (process.platform === 'win32') {
-        const ext = path.extname(geminiBin).toLowerCase();
-        if (ext === '.cmd' || ext === '.bat') {
-            return {
-                command: process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe',
-                args: ['/c', geminiBin, ...taskArgs]
-            };
-        }
-    }
-    return { command: geminiBin, args: taskArgs };
-}
-
-async function execGeminiCommand(args: string[], timeoutMs = 10000) {
-    const { command, args: spawnArgs } = buildSpawnCommand(args);
-    return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-        const child = spawn(command, spawnArgs, {
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-        let stdout = '';
-        let stderr = '';
-        child.stdout?.on('data', (chunk) => {
-            stdout += chunk.toString();
-        });
-        child.stderr?.on('data', (chunk) => {
-            stderr += chunk.toString();
-        });
-        const timer = timeoutMs
-            ? setTimeout(() => {
-                  child.kill();
-                  reject(new Error('Timed out during Gemini CLI health check.'));
-              }, timeoutMs)
-            : undefined;
-        child.on('error', (error) => {
-            if (timer) {
-                clearTimeout(timer);
-            }
-            reject(error);
-        });
-        child.on('close', (code) => {
-            if (timer) {
-                clearTimeout(timer);
-            }
-            if (code === 0) {
-                resolve({ stdout, stderr });
-            } else {
-                const text = (stderr || stdout || `Gemini CLI exited with code ${code}`).trim();
-                reject(new Error(text));
-            }
-        });
-    });
-}
+// execGeminiCommand moved to server/src/processUtils.ts
 
 async function updateCliStatus(reason: string) {
     if (cliCheckPromise) {
@@ -1394,7 +1077,8 @@ async function updateCliStatus(reason: string) {
     }
     cliCheckPromise = (async () => {
         try {
-            const { stdout, stderr } = await execGeminiCommand(['--version']);
+            const v = buildSpawnCommand(['--version']);
+            const { stdout, stderr } = await execGeminiCommand(v.command, v.args);
             const versionLine =
                 stdout
                     .split(/\r?\n/)
@@ -1415,10 +1099,14 @@ async function updateCliStatus(reason: string) {
         } catch (error) {
             const message = formatWorkspaceError(error);
             const state = classifyCliFailure(message);
-            enterCliFailure(state, `${message} [${reason}]`, { force: true });
+            // Only force marking the CLI as unavailable for high-confidence states
+            // like 'missing' or 'quota_exhausted'. Generic 'error' should not
+            // immediately force a global failure since it may be transient.
+            const shouldForce = state !== 'error';
+            enterCliFailure(state, `${message} [${reason}]`, { force: shouldForce });
         } finally {
             cliCheckPromise = undefined;
-            scheduleStatusSnapshot();
+            persistence.scheduleStatusSnapshot();
         }
     })();
     await cliCheckPromise;
@@ -1432,6 +1120,22 @@ function classifyCliFailure(message: string): CliHealthState {
     if (lower.includes('enoent') || lower.includes('not found') || lower.includes('is not recognized')) {
         return 'missing';
     }
+    // Detect common network / service failures and treat them as 'unresponsive'
+    if (
+        lower.includes('failed to connect') ||
+        lower.includes('connection refused') ||
+        lower.includes('connection reset') ||
+        lower.includes('timed out') ||
+        lower.includes('timeout') ||
+        lower.includes('service unavailable') ||
+        lower.includes('503') ||
+        lower.includes('502') ||
+        lower.includes('ecxn') ||
+        lower.includes('network') ||
+        lower.includes('could not reach')
+    ) {
+        return 'unresponsive';
+    }
     return 'error';
 }
 
@@ -1439,24 +1143,33 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
     if (state === 'unknown') {
         return;
     }
+    // Do not be aggressive about cancelling running tasks for transient
+    // failures. Only force-cancel when we have a high-confidence unusable
+    // state (e.g., 'missing' or 'quota_exhausted') or when caller set force.
     if (!options?.force && state === 'error') {
+        // transient, record status but do not cancel running tasks
+        acceptingTasks = false;
+        cliStatus = { state, message, lastChecked: Date.now() };
+        persistence.scheduleStatusSnapshot();
+        void persistence.persistLiveStatus();
         return;
     }
+
     acceptingTasks = false;
-    cliStatus = {
-        state,
-        message,
-        lastChecked: Date.now()
-    };
-    pool.cancelAll();
-    for (const task of tasks.values()) {
-        if (!completedStatuses.includes(task.status)) {
-            appendLog(task, `\nGemini CLI unavailable: ${message}`);
-            markTaskStatus(task, 'failed', message);
+    cliStatus = { state, message, lastChecked: Date.now() };
+
+    const shouldCancel = options?.force || state === 'missing' || state === 'quota_exhausted';
+    if (shouldCancel) {
+        pool.cancelAll();
+        for (const task of tasks.values()) {
+            if (!completedStatuses.includes(task.status)) {
+                appendLog(task, `\nGemini CLI unavailable: ${message}`);
+                markTaskStatus(task, 'failed', message);
+            }
         }
     }
-    scheduleStatusSnapshot();
-    void persistLiveStatus();
+    persistence.scheduleStatusSnapshot();
+    void persistence.persistLiveStatus();
 }
 
 function maybeUpdateCliStatusFromFailure(message: string) {
@@ -1485,37 +1198,14 @@ function stopCliHealthWatcher() {
     // Nothing to stop; watcher is disabled.
 }
 
-function readTimeoutEnv(name: string, fallback: number) {
-    const raw = process.env[name];
-    if (!raw || raw.trim().length === 0) {
-        return fallback;
-    }
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-        return fallback;
-    }
-    return parsed;
-}
-
-function readPriorityEnv(name: string, fallback: number) {
-    const raw = process.env[name];
-    if (!raw || raw.trim().length === 0) {
-        return fallback;
-    }
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) {
-        return fallback;
-    }
-    const clamped = Math.max(-5, Math.min(5, Math.trunc(parsed)));
-    return clamped;
-}
+// `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/utils.ts`
 
 async function start() {
     await validateGeminiExecutable();
     await updateCliStatus('startup');
-    await loadPersistedTasks();
-    await pruneOldTasks();
-    await persistLiveStatus();
+    await persistence.loadPersistedTasks();
+    await persistence.pruneOldTasks();
+    await persistence.persistLiveStatus();
     startCliHealthWatcher();
     const transport = new StdioServerTransport();
     await server.connect(transport);
@@ -1523,7 +1213,12 @@ async function start() {
 
 registerShutdownHandlers();
 
-start().catch((err) => {
-    console.error('Failed to start Gemini CLI MCP server', err);
-    process.exit(1);
-});
+// Allow tests or embedding tools to import the module without auto-starting
+// the server. Set `GEMINI_MCP_SKIP_START=1` in the environment to prevent
+// automatic start (used by unit tests).
+if (!process.env.GEMINI_MCP_SKIP_START) {
+    start().catch((err) => {
+        console.error('Failed to start Gemini CLI MCP server', err);
+        process.exit(1);
+    });
+}

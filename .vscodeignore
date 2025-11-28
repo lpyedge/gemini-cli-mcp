@@ -8,3 +8,4 @@ tsconfig.json
 server/tsconfig.json
 package-lock.json
 dist/*.vsix
+test-temp/**

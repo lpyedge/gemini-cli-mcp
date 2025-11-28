@@ -10,6 +10,7 @@ interface GeminiConfig {
     maxQueue: number;
     defaultTimeouts: TimeoutConfig;
     defaultPriorities: PriorityConfig;
+    unhealthyStates?: string[];
 }
 
 interface TimeoutConfig {
@@ -63,7 +64,10 @@ const STATUS_POLL_INTERVAL_MS = 3000;
 const TOOLTIP_TASK_LIMIT = 5;
 const COMPLETED_TOOLTIP_LIMIT = 3;
 const COMPLETED_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
-const CLI_UNHEALTHY_STATES = new Set<CliHealthState>(['missing', 'quota_exhausted', 'error']);
+// Treat only 'missing' and 'quota_exhausted' as unhealthy-forcing red state.
+// Generic 'error' may be transient (network, timeout) and should not
+// immediately flip the status bar to red.
+const CLI_UNHEALTHY_STATES = new Set<CliHealthState>(['missing', 'quota_exhausted']);
 
 class GeminiCliHealth implements vscode.Disposable {
     private status: CliStatusSnapshot = { state: 'unknown', message: 'Gemini CLI health not checked yet.' };
@@ -129,7 +133,7 @@ class GeminiCliHealth implements vscode.Disposable {
         return new Promise<string>((resolve, reject) => {
             const child = spawn(config.geminiPath, ['--version'], {
                 shell: process.platform === 'win32',
-                windowsHide: true
+                windowsHide: process.platform === 'win32'
             });
             let stdout = '';
             let stderr = '';
@@ -186,6 +190,8 @@ function readConfig(): GeminiConfig {
         maxQueue: config.get<number>('maxQueue', 200),
         defaultTimeouts,
         defaultPriorities
+        ,
+        unhealthyStates: config.get<string[]>('unhealthyStates', ['missing'])
     };
 }
 
@@ -256,9 +262,17 @@ export function activate(context: vscode.ExtensionContext) {
             if (!resolvedTaskCwd) {
                 if (!workspaceWarningShown) {
                     workspaceWarningShown = true;
-                    void vscode.window.showWarningMessage(
-                        'Gemini CLI MCP requires an open workspace or an absolute taskCwd before it can run.'
-                    );
+                    void vscode.window
+                        .showWarningMessage(
+                            'Gemini CLI MCP requires an open workspace or an absolute taskCwd before it can run.',
+                            'Open Settings',
+                            'Dismiss'
+                        )
+                        .then((choice) => {
+                            if (choice === 'Open Settings') {
+                                void vscode.commands.executeCommand('workbench.action.openSettings', 'geminiMcp.taskCwd');
+                            }
+                        });
                 }
                 return servers;
             }
@@ -298,9 +312,17 @@ export function activate(context: vscode.ExtensionContext) {
             const cfg = readConfig();
             statusMonitor.updateConfig(cfg);
             workspaceWarningShown = false;
-            vscode.window.showWarningMessage(
-                'Gemini CLI MCP settings changed. Reload VS Code to re-validate the Gemini CLI state.'
-            );
+                    void vscode.window
+                        .showWarningMessage(
+                            'Gemini CLI MCP settings changed. Reload VS Code to re-validate the Gemini CLI state.',
+                            'Reload',
+                            'Dismiss'
+                        )
+                        .then((choice) => {
+                            if (choice === 'Reload') {
+                                void vscode.commands.executeCommand('workbench.action.reloadWindow');
+                            }
+                        });
         }
     });
     context.subscriptions.push(configWatcher);
@@ -401,7 +423,8 @@ class TaskStatusMonitor implements vscode.Disposable {
         const maxWorkers = snapshot?.maxWorkers ?? cfg?.maxWorkers ?? 0;
         const queueLimit = snapshot?.queueLimit ?? cfg?.maxQueue ?? 0;
         const cliStatus = snapshot?.cliStatus ?? this.cliHealth.getStatus();
-        const cliHealthy = !cliStatus || !CLI_UNHEALTHY_STATES.has(cliStatus.state);
+        const unhealthyStates = new Set<string>(this.config?.unhealthyStates ?? ['missing']);
+        const cliHealthy = !cliStatus || !unhealthyStates.has(cliStatus.state);
         const overload =
             queueLimit > 0 ? queued / queueLimit >= 1 : false;
         const warning = !overload && queueLimit > 0 ? queued / queueLimit >= 0.8 : false;

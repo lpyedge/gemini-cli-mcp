@@ -21,6 +21,13 @@ const targets = [
     outfile: path.join(projectRoot, 'server', 'dist', 'index.js'),
     external: []
   }
+  ,
+  {
+    name: 'spawnHelpers',
+    entry: path.join(projectRoot, 'server', 'src', 'spawnHelpers.ts'),
+    outfile: path.join(projectRoot, 'server', 'dist', 'spawnHelpers.js'),
+    external: []
+  }
 ];
 
 mkdirSync(path.join(projectRoot, 'dist'), { recursive: true });
@@ -34,7 +41,9 @@ async function buildTarget(target) {
     bundle: true,
     external: target.external,
     sourcemap: false,
-    format: 'cjs',
+    // Build server as ESM to match server/package.json { "type": "module" }.
+    // Keep the extension target as CJS for VS Code compatibility.
+    format: target.name === 'server' || target.name === 'spawnHelpers' ? 'esm' : 'cjs',
     target: 'node18',
     logLevel: 'info',
     minify: true

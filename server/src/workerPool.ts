@@ -73,6 +73,12 @@ export class WorkerPool {
             if (!entry) {
                 continue;
             }
+            // Skip entries that were aborted while still in the queue so we don't
+            // count them as running or start their handler.
+            if (entry.controller.signal.aborted) {
+                // ensure it's not left referenced anywhere and continue pumping
+                continue;
+            }
             this.running += 1;
             this.active.set(entry.id, entry);
             entry.handler(entry.controller.signal)
