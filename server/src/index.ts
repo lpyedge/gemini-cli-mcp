@@ -52,6 +52,7 @@ let cliStatus: CliStatusSnapshot = {
     lastChecked: Date.now()
 };
 let cliCheckPromise: Promise<void> | undefined;
+let acceptingTasks = false;
 const allowedCwdRoots = [workspaceRoot, os.tmpdir(), os.homedir()].map((p) => path.normalize(p));
 const defaultTimeouts: Record<string, number> = {
     'tests.run': readTimeoutEnv('GEMINI_TIMEOUT_TESTS_RUN', 10 * 60 * 1000),
@@ -1410,13 +1411,11 @@ async function updateCliStatus(reason: string) {
                 version: versionLine,
                 lastChecked: Date.now()
             };
+            acceptingTasks = true;
         } catch (error) {
             const message = formatWorkspaceError(error);
-            cliStatus = {
-                state: classifyCliFailure(message),
-                message: `${message} [${reason}]`,
-                lastChecked: Date.now()
-            };
+            const state = classifyCliFailure(message);
+            enterCliFailure(state, `${message} [${reason}]`, { force: true });
         } finally {
             cliCheckPromise = undefined;
             scheduleStatusSnapshot();
@@ -1436,27 +1435,46 @@ function classifyCliFailure(message: string): CliHealthState {
     return 'error';
 }
 
+function enterCliFailure(state: CliHealthState, message: string, options?: { force?: boolean }) {
+    if (state === 'unknown') {
+        return;
+    }
+    if (!options?.force && state === 'error') {
+        return;
+    }
+    acceptingTasks = false;
+    cliStatus = {
+        state,
+        message,
+        lastChecked: Date.now()
+    };
+    pool.cancelAll();
+    for (const task of tasks.values()) {
+        if (!completedStatuses.includes(task.status)) {
+            appendLog(task, `\nGemini CLI unavailable: ${message}`);
+            markTaskStatus(task, 'failed', message);
+        }
+    }
+    scheduleStatusSnapshot();
+    void persistLiveStatus();
+}
+
 function maybeUpdateCliStatusFromFailure(message: string) {
     if (!message) {
         return;
     }
     const trimmed = message.trim();
     const classification = classifyCliFailure(trimmed);
-    if (classification !== 'error') {
-        cliStatus = {
-            state: classification,
-            message: trimmed,
-            lastChecked: Date.now()
-        };
-        scheduleStatusSnapshot();
-    }
+    enterCliFailure(classification, trimmed);
 }
 
 function ensureCliReady() {
-    if (cliStatus.state === 'ok') {
+    if (acceptingTasks && cliStatus.state === 'ok') {
         return;
     }
-    throw new Error(`Gemini CLI unavailable (${cliStatus.message}).`);
+    throw new Error(
+        `Gemini CLI unavailable (${cliStatus.message}). Reload VS Code after fixing the CLI to re-enable background workers.`
+    );
 }
 
 function startCliHealthWatcher() {

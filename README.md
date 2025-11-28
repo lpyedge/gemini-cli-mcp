@@ -48,6 +48,7 @@ The server validates that `GEMINI_TASK_CWD` (or the resolved workspace root) liv
 ## MCP Surface
 
 - Orchestration: `gemini.task.submit`, `gemini.task.status`, `gemini.task.list`, `gemini.task.tail`, `gemini.task.cancel`, `gemini.task.prune`
+- Automation hints: `gemini.task.suggest`
 - File helpers: `fs.read`, `fs.write`
 - High-level tools: `code.analyze`, `code.format.batch`, `tests.run`
 - Resources: `tasks://{id}/log`, `tasks://{id}/summary`

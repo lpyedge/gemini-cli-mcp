@@ -75,11 +75,15 @@ export class WorkerPool {
             }
             this.running += 1;
             this.active.set(entry.id, entry);
-            entry.handler(entry.controller.signal).finally(() => {
-                this.active.delete(entry.id);
-                this.running -= 1;
-                this.pump();
-            });
+            entry.handler(entry.controller.signal)
+                .catch((error) => {
+                    console.error(`WorkerPool job ${entry.id} failed`, error);
+                })
+                .finally(() => {
+                    this.active.delete(entry.id);
+                    this.running -= 1;
+                    this.pump();
+                });
         }
     }
 }

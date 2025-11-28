@@ -63,8 +63,6 @@ const STATUS_POLL_INTERVAL_MS = 3000;
 const TOOLTIP_TASK_LIMIT = 5;
 const COMPLETED_TOOLTIP_LIMIT = 3;
 const COMPLETED_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
-const CLI_HEALTH_REFRESH_INTERVAL_MS = 60 * 1000;
-const CLI_HEALTH_FAILURE_INTERVAL_MS = 60 * 1000;
 const CLI_UNHEALTHY_STATES = new Set<CliHealthState>(['missing', 'quota_exhausted', 'error']);
 
 class GeminiCliHealth implements vscode.Disposable {
@@ -89,23 +87,6 @@ class GeminiCliHealth implements vscode.Disposable {
     async refresh(config: GeminiConfig) {
         this.lastConfigKey = this.buildConfigKey(config);
         await this.runCheck(config);
-    }
-
-    async ensureRecent(config: GeminiConfig) {
-        const key = this.buildConfigKey(config);
-        const now = Date.now();
-        const lastChecked = this.status.lastChecked ?? 0;
-        const healthy = this.status.state === 'ok';
-        const interval = healthy ? CLI_HEALTH_REFRESH_INTERVAL_MS : CLI_HEALTH_FAILURE_INTERVAL_MS;
-        const needConfigRefresh = !this.lastConfigKey || this.lastConfigKey !== key;
-        const stale =
-            !this.status.lastChecked ||
-            needConfigRefresh ||
-            now - lastChecked > interval ||
-            this.status.state === 'unknown';
-        if (stale) {
-            await this.refresh(config);
-        }
     }
 
     private buildConfigKey(config: GeminiConfig) {
@@ -249,7 +230,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(statusMonitor);
 
     const initialConfig = readConfig();
-    void cliHealth.refresh(initialConfig);
+    const initialHealthCheck = cliHealth.refresh(initialConfig);
 
     const providerEmitter = new vscode.EventEmitter<void>();
     context.subscriptions.push(providerEmitter);
@@ -263,9 +244,9 @@ export function activate(context: vscode.ExtensionContext) {
     const provider = vscode.lm.registerMcpServerDefinitionProvider('gemini-mcp-provider', {
         onDidChangeMcpServerDefinitions: providerEmitter.event,
         provideMcpServerDefinitions: async () => {
+            await initialHealthCheck.catch(() => {});
             const servers: vscode.McpServerDefinition[] = [];
             const cfg = readConfig();
-            await cliHealth.ensureRecent(cfg);
             if (!cliHealth.isHealthy()) {
                 return servers;
             }
@@ -316,17 +297,18 @@ export function activate(context: vscode.ExtensionContext) {
             providerEmitter.fire();
             const cfg = readConfig();
             statusMonitor.updateConfig(cfg);
-            void cliHealth.refresh(cfg);
             workspaceWarningShown = false;
-            vscode.window.showInformationMessage('Gemini CLI MCP config updated; server will reload shortly');
+            vscode.window.showWarningMessage(
+                'Gemini CLI MCP settings changed. Reload VS Code to re-validate the Gemini CLI state.'
+            );
         }
     });
     context.subscriptions.push(configWatcher);
 
     const showStatusCmd = vscode.commands.registerCommand('geminiMcp.showStatus', async () => {
+        await initialHealthCheck.catch(() => {});
         const cfg = readConfig();
         statusMonitor.updateConfig(cfg);
-        await cliHealth.ensureRecent(cfg);
         const cliStatus = cliHealth.getStatus();
         const cliLabel =
             cliStatus.state === 'ok'
