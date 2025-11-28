@@ -76,11 +76,13 @@ const server = new McpServer({
     version: '0.2.0'
 });
 
+const nonNegativeTimeout = z.number().int().nonnegative().optional();
+
 const taskSchema = z.object({
     command: z.array(z.string()).nonempty(),
     stdin: z.string().optional(),
     cwd: z.string().optional(),
-    timeoutMs: z.number().int().positive().optional(),
+    timeoutMs: nonNegativeTimeout,
     priority: z.number().int().min(-5).max(5).optional()
 });
 
@@ -89,7 +91,7 @@ const analyzeSchema = z.object({
     prompt: z.string().optional(),
     subcommand: z.string().default('code'),
     cwd: z.string().optional(),
-    timeoutMs: z.number().int().positive().optional(),
+    timeoutMs: nonNegativeTimeout,
     priority: z.number().int().min(-5).max(5).optional()
 });
 
@@ -97,7 +99,7 @@ const testSchema = z.object({
     command: z.string().default('npm'),
     args: z.array(z.string()).default(['test']),
     cwd: z.string().optional(),
-    timeoutMs: z.number().int().positive().optional(),
+    timeoutMs: nonNegativeTimeout,
     priority: z.number().int().min(-5).max(5).optional()
 });
 
@@ -106,7 +108,7 @@ const formatSchema = z.object({
     formatter: z.string().default('code edit'),
     extraArgs: z.array(z.string()).optional(),
     cwd: z.string().optional(),
-    timeoutMs: z.number().int().positive().optional(),
+    timeoutMs: nonNegativeTimeout,
     priority: z.number().int().min(-5).max(5).optional()
 });
 

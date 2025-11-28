@@ -64,3 +64,4 @@ All responses include `logUri` pointers so Copilot (or you) can stream output in
 ## Notes
 
 - Allowed working directories: workspace folders, your home directory, or the OS temp directory. Anything else is rejected.
+- If Gemini CLI health transitions to `missing`, `quota_exhausted`, or `error`, reload VS Code (which restarts the MCP server) after fixing the underlying issue; the server does not automatically retry those states.
