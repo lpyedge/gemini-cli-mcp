@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, ChildProcess, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WorkerPool } from './workerPool.js';
 import { TaskRecord, TaskStatus } from './types.js';
 
-const geminiBin = resolveGeminiBinary(process.env.GEMINI_CLI || 'gemini');
+const geminiBin = resolveGeminiBinary(
+    (process.env.GEMINI_CLI ?? '').trim() || autoDiscoverGeminiBinary() || 'gemini'
+);
 const workerCount = Number(process.env.GEMINI_MAX_WORKERS || '3');
 const rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
 if (!rawWorkspaceRootEnv) {
@@ -1235,6 +1237,79 @@ async function validateGeminiExecutable() {
         } catch {
             throw new Error(`Gemini CLI not found at ${geminiBin}`);
         }
+    }
+}
+
+function autoDiscoverGeminiBinary() {
+    if (process.platform !== 'win32') {
+        return undefined;
+    }
+    const fromCommonPaths = findGeminiInCommonPaths();
+    if (fromCommonPaths) {
+        console.log(`Gemini CLI auto-detected at ${fromCommonPaths}`);
+        return fromCommonPaths;
+    }
+    const fromWhere = findGeminiViaWhere();
+    if (fromWhere) {
+        console.log(`Gemini CLI located via 'where': ${fromWhere}`);
+        return fromWhere;
+    }
+    return undefined;
+}
+
+function findGeminiInCommonPaths() {
+    const candidates: string[] = [];
+    const localApp = process.env.LOCALAPPDATA;
+    const programFiles = process.env.ProgramFiles;
+    const programFilesX86 = process.env['ProgramFiles(x86)'];
+    const userProfile = process.env.USERPROFILE;
+    const baseDirs = [localApp, programFiles, programFilesX86, userProfile].filter(
+        (dir): dir is string => !!dir && dir.trim().length > 0
+    );
+    const subPaths = [
+        ['Programs', 'Gemini CLI'],
+        ['Google', 'Gemini CLI'],
+        ['Gemini CLI'],
+        ['AppData', 'Local', 'Gemini CLI']
+    ];
+    const fileNames = ['gemini.exe', 'gemini.cmd', path.join('bin', 'gemini.exe'), path.join('bin', 'gemini.cmd')];
+    for (const base of baseDirs) {
+        for (const sub of subPaths) {
+            const root = path.join(base, ...sub);
+            for (const file of fileNames) {
+                candidates.push(path.join(root, file));
+            }
+        }
+    }
+    for (const candidate of candidates) {
+        if (candidate && fsSync.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    return undefined;
+}
+
+function findGeminiViaWhere() {
+    try {
+        const result = spawnSync('where', ['gemini'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        if (result.status !== 0) {
+            return undefined;
+        }
+        const lines = (result.stdout || '')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0 && fsSync.existsSync(line));
+        if (lines.length === 0) {
+            return undefined;
+        }
+        const exe = lines.find((line) => line.toLowerCase().endsWith('.exe'));
+        if (exe) {
+            return exe;
+        }
+        const cmd = lines.find((line) => line.toLowerCase().endsWith('.cmd') || line.toLowerCase().endsWith('.bat'));
+        return cmd ?? lines[0];
+    } catch {
+        return undefined;
     }
 }
 
