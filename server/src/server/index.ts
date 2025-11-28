@@ -32,6 +32,8 @@ const stateDir = path.join(workspaceRoot, '.vscode', 'gemini-mcp');
 const logDir = path.join(stateDir, 'logs');
 const stateFile = path.join(stateDir, 'tasks.json');
 const statusFile = path.join(stateDir, 'status.json');
+const lockFile = path.join(stateDir, 'server.lock');
+let lockHeld = false;
 const maxQueueSize = Math.max(1, Number(process.env.GEMINI_MAX_QUEUE || '200'));
 const retentionMs = 7 * 24 * 60 * 60 * 1000;
 const suggestSampleLimit = 200;
@@ -88,7 +90,9 @@ const persistence = createPersistenceManager({
     PERSIST_DEBOUNCE_MS,
     LIVE_STATUS_LIMIT,
     pool,
-    workerCount
+    workerCount,
+    getCliStatus: () => cliStatus,
+    queueLimit: maxQueueSize
 });
 
 const server = new McpServer({
@@ -614,13 +618,26 @@ async function createTask(
 
 function enqueueCliTask(task: TaskRecord, stdinText?: string) {
     const jobId = pool.enqueue(async (signal) => {
-        const finalize = (status: TaskStatus, error?: string) => {
+        const finalize = async (status: TaskStatus, error?: string) => {
             task.jobId = undefined;
             markTaskStatus(task, status, error);
+            if (completedStatuses.includes(status)) {
+                try {
+                    // Wait a tick to allow the WorkerPool to decrement its running
+                    // count (which happens in the pool pump's finally) before
+                    // persisting the live status. This avoids a race where the
+                    // status file is written while the pool still reports the
+                    // task as running.
+                    await new Promise((resolve) => setImmediate(resolve));
+                    await persistence.flushPendingPersistence();
+                } catch (err) {
+                    // best-effort
+                }
+            }
         };
         if (signal.aborted) {
             appendLog(task, '\nAborted before start.');
-            finalize('canceled');
+            await finalize('canceled');
             return;
         }
         appendLog(task, `Working directory: ${task.cwd ?? workspaceRoot}\n`);
@@ -667,21 +684,21 @@ function enqueueCliTask(task: TaskRecord, stdinText?: string) {
         });
 
         let exitCode: number | null;
-        try {
-            exitCode = await new Promise<number | null>((resolve, reject) => {
-                child.on('error', reject);
-                child.on('close', (code) => resolve(code));
-            });
-        } catch (error) {
-            const message = formatWorkspaceError(error);
-            appendLog(task, `\n${message}`);
-            finalize('failed', message);
-            maybeUpdateCliStatusFromFailure(message);
-            if (timeoutTimer) {
-                clearTimeout(timeoutTimer);
+            try {
+                exitCode = await new Promise<number | null>((resolve, reject) => {
+                    child.on('error', reject);
+                    child.on('close', (code) => resolve(code));
+                });
+            } catch (error) {
+                const message = formatWorkspaceError(error);
+                appendLog(task, `\n${message}`);
+                await finalize('failed', message);
+                maybeUpdateCliStatusFromFailure(message);
+                if (timeoutTimer) {
+                    clearTimeout(timeoutTimer);
+                }
+                return;
             }
-            return;
-        }
 
         if (timeoutTimer) {
             clearTimeout(timeoutTimer);
@@ -689,15 +706,15 @@ function enqueueCliTask(task: TaskRecord, stdinText?: string) {
 
         task.exitCode = exitCode ?? undefined;
         if (canceledDuringRun) {
-            finalize('canceled');
+            await finalize('canceled');
             return;
         }
         if (exitCode === 0) {
-            finalize('succeeded');
+            await finalize('succeeded');
         } else {
             const stderrText = stderrBuffer.join('').trim() || `Gemini exited with code ${exitCode ?? -1}`;
             maybeUpdateCliStatusFromFailure(stderrText);
-            finalize('failed', stderrText);
+            await finalize('failed', stderrText);
         }
     });
     task.jobId = jobId;
@@ -781,6 +798,7 @@ function updateLastLogLine(task: TaskRecord, chunk: string) {
 }
 
 function markTaskStatus(task: TaskRecord, status: TaskStatus, error?: string) {
+    const prev = task.status;
     task.status = status;
     if (status === 'running') {
         task.startedAt = task.startedAt ?? Date.now();
@@ -792,10 +810,23 @@ function markTaskStatus(task: TaskRecord, status: TaskStatus, error?: string) {
         task.error = error;
     }
     task.updatedAt = Date.now();
+    // diagnostic log to help trace state transitions
+    try {
+        console.log(`[task] ${task.id} status ${prev} -> ${status} (jobId=${task.jobId ?? 'nil'})`);
+    } catch (err) {
+        // ignore logging errors
+    }
     taskEvents.emit('update', task);
     persistence.schedulePersist();
     if (completedStatuses.includes(status)) {
         void persistence.pruneOldTasks(retentionMs);
+        // Ensure completed status is immediately persisted to avoid snapshot
+        // races where the live status file still shows running tasks.
+        try {
+            void persistence.flushPendingPersistence();
+        } catch (err) {
+            // best-effort: do not throw from status-update path
+        }
     }
 }
 
@@ -913,8 +944,77 @@ async function handleShutdown(reason: string) {
             }
         }
         await persistence.flushPendingPersistence();
+        // Release any acquired state lock so other server instances can start.
+        try {
+            await releaseStateLock();
+        } catch (err) {
+            // best-effort: log and continue
+            console.error('Failed to release state lock', err);
+        }
     } catch (error) {
         console.error('Failed to flush tasks during shutdown', error);
+    }
+}
+
+async function acquireStateLock() {
+    // Ensure state directory exists before attempting lock file operations.
+    await fs.mkdir(stateDir, { recursive: true });
+    try {
+        const raw = await fs.readFile(lockFile, 'utf8').catch(() => undefined);
+        if (raw) {
+            let parsed: any = undefined;
+            try {
+                parsed = JSON.parse(raw);
+            } catch {
+                // malformed lock, remove and continue
+                await fs.unlink(lockFile).catch(() => {});
+            }
+            if (parsed && parsed.pid) {
+                const other = Number(parsed.pid);
+                if (Number.isFinite(other) && other > 0) {
+                    try {
+                        process.kill(other, 0);
+                        throw new Error(`State directory locked by running process ${other}`);
+                    } catch (err: any) {
+                        if (err && err.code === 'ESRCH') {
+                            // process not found; stale lock - remove and continue
+                            await fs.unlink(lockFile).catch(() => {});
+                        } else if (err && err.message && err.message.startsWith('State directory locked')) {
+                            throw err;
+                        } else {
+                            // On Windows or permission issues, treat as locked
+                            throw new Error(`State directory appears locked by PID ${other}`);
+                        }
+                    }
+                }
+            }
+        }
+        await fs.writeFile(lockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), 'utf8');
+        lockHeld = true;
+    } catch (err) {
+        throw err;
+    }
+}
+
+async function releaseStateLock() {
+    if (!lockHeld) {
+        return;
+    }
+    try {
+        const raw = await fs.readFile(lockFile, 'utf8').catch(() => undefined);
+        if (raw) {
+            try {
+                const parsed = JSON.parse(raw);
+                if (parsed && parsed.pid === process.pid) {
+                    await fs.unlink(lockFile).catch(() => {});
+                }
+            } catch {
+                // malformed: ensure removal
+                await fs.unlink(lockFile).catch(() => {});
+            }
+        }
+    } finally {
+        lockHeld = false;
     }
 }
 

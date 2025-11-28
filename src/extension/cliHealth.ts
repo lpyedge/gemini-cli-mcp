@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { CliHealthState, CliStatusSnapshot, GeminiConfig } from './types';
 
 // Manages checking the Gemini CLI health and exposing a change event.
@@ -39,6 +40,18 @@ export class GeminiCliHealth implements vscode.Disposable {
         }
         this.status = { state: 'checking', message: 'Checking Gemini CLI...' };
         this.onDidChangeEmitter.fire();
+        // Short-circuit if geminiPath is not configured or missing on disk
+        if (!config.geminiPath) {
+            this.status = { state: 'missing', message: 'geminiPath not configured' };
+            this.onDidChangeEmitter.fire();
+            return Promise.resolve();
+        }
+        if (!fs.existsSync(config.geminiPath)) {
+            this.status = { state: 'missing', message: `geminiPath not found: ${config.geminiPath}` };
+            this.onDidChangeEmitter.fire();
+            return Promise.resolve();
+        }
+
         this.checking = this.executeVersion(config)
             .then((versionInfo) => {
                 const version = versionInfo.trim() || 'Gemini CLI';

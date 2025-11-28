@@ -24,13 +24,20 @@ async function main() {
       PATH: process.env.PATH ?? process.env.Path ?? '',
       Path: process.env.PATH ?? process.env.Path ?? ''
     },
-    stderr: 'pipe'
+    stderr: 'pipe',
+    stdout: 'pipe'
   });
 
   const stderrStream = transport.stderr;
   if (stderrStream) {
     stderrStream.on('data', (chunk) => {
       process.stderr.write(`[server stderr] ${chunk}`);
+    });
+  }
+  const stdoutStream = transport.stdout;
+  if (stdoutStream) {
+    stdoutStream.on('data', (chunk) => {
+      process.stdout.write(`[server stdout] ${chunk}`);
     });
   }
 

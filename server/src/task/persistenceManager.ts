@@ -23,16 +23,27 @@ export function createPersistenceManager(options: {
     retentionMs: number;
     PERSIST_DEBOUNCE_MS: number;
     LIVE_STATUS_LIMIT: number;
-    pool: { runningCount: () => number; queuedCount: () => number };
+    pool: { runningCount: () => number; queuedCount: () => number; on?: (ev: string, cb: () => void) => void };
     workerCount: number;
+    // optional provider for CLI status snapshot
+    getCliStatus?: () => unknown;
+    // optional queue limit to report in live status
+    queueLimit?: number;
 }) {
-    const { tasks, taskEvents, stateFile, statusFile, logDir, retentionMs, PERSIST_DEBOUNCE_MS, LIVE_STATUS_LIMIT, pool, workerCount } = options;
+    const { tasks, taskEvents, stateFile, statusFile, logDir, retentionMs, PERSIST_DEBOUNCE_MS, LIVE_STATUS_LIMIT, pool, workerCount, getCliStatus, queueLimit } = options;
 
     let persistTimer: NodeJS.Timeout | undefined;
     let statusPersistTimer: NodeJS.Timeout | undefined;
 
     async function persistTasks() {
-        await persistTasksToFile(stateFile, tasks);
+        try {
+            console.log(`[persistence] Persisting ${tasks.size} tasks to ${stateFile}`);
+            await persistTasksToFile(stateFile, tasks);
+            console.log('[persistence] Persisted tasks successfully');
+        } catch (error) {
+            console.error('[persistence] Failed to persist tasks', error);
+            throw error;
+        }
     }
 
     function schedulePersist() {
@@ -56,9 +67,16 @@ export function createPersistenceManager(options: {
     }
 
     async function persistLiveStatus() {
-        await fs.mkdir(path.dirname(statusFile), { recursive: true });
-        const payload = buildLiveStatusPayload();
-        await fs.writeFile(statusFile, JSON.stringify(payload, null, 2), 'utf8');
+        try {
+            await fs.mkdir(path.dirname(statusFile), { recursive: true });
+            const payload = buildLiveStatusPayload();
+            console.log(`[persistence] Writing live status (running=${payload.running}, queued=${payload.queued}) to ${statusFile}`);
+            await fs.writeFile(statusFile, JSON.stringify(payload, null, 2), 'utf8');
+            console.log('[persistence] Wrote live status successfully');
+        } catch (error) {
+            console.error('[persistence] Failed to write live status', error);
+            throw error;
+        }
     }
 
     async function flushPendingPersistence() {
@@ -86,16 +104,25 @@ export function createPersistenceManager(options: {
                 startedAt: task.startedAt,
                 updatedAt: task.updatedAt,
                 completedAt: task.completedAt,
+                exitCode: task.exitCode,
                 lastLogLine: task.lastLogLine,
+                logLength: task.logLength,
+                error: task.error,
                 priority: task.priority
             }));
+
+        // Derive authoritative running/queued counts from task records to avoid
+        // races where the worker pool's internal counters may lag.
+        const runningCount = Array.from(tasks.values()).filter((t) => t.status === 'running').length;
+        const queuedCount = Array.from(tasks.values()).filter((t) => t.status === 'queued').length;
+
         return {
             updatedAt: Date.now(),
-            running: pool.runningCount(),
-            queued: pool.queuedCount(),
+            running: runningCount,
+            queued: queuedCount,
             maxWorkers: workerCount,
-            queueLimit: 0,
-            cliStatus: undefined,
+            queueLimit: typeof queueLimit === 'number' ? queueLimit : 0,
+            cliStatus: typeof getCliStatus === 'function' ? getCliStatus() : undefined,
             tasks: snapshotTasks
         };
     }
@@ -136,6 +163,30 @@ export function createPersistenceManager(options: {
 
     // wire task-events to status snapshot
     taskEvents.on('update', () => scheduleStatusSnapshot());
+
+    // If the worker pool exposes lifecycle events, subscribe so we can
+    // persist status immediately after the pool's running count changes.
+    try {
+        if (typeof pool.on === 'function') {
+            pool.on('changed', () => {
+                try {
+                    scheduleStatusSnapshot();
+                    void persistLiveStatus().catch((err) => console.error('[persistence] Failed to persist live status (pool change)', err));
+                } catch (err) {
+                    console.error('[persistence] Error handling pool change event', err);
+                }
+            });
+            pool.on('queue', () => {
+                try {
+                    scheduleStatusSnapshot();
+                } catch (err) {
+                    console.error('[persistence] Error handling pool queue event', err);
+                }
+            });
+        }
+    } catch {
+        // best-effort: ignore subscription failures
+    }
 
     return {
         persistTasks,

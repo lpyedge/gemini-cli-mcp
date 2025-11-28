@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -72,6 +72,17 @@ async function buildTarget(target) {
 
 try {
   await Promise.all(targets.map((target) => buildTarget(target)));
+  // After all targets built, verify critical outputs exist so packaging can fail early
+  const serverTarget = targets.find((t) => t.name === 'server');
+  if (serverTarget) {
+    if (!existsSync(serverTarget.outfile)) {
+      console.error(`Bundling error: expected server bundle not found at ${serverTarget.outfile}`);
+      console.error('Ensure the server target compiled successfully and that bundling did not place output in a different location.');
+      console.error('Check `scripts/bundle.mjs` targets and `package.json` files configuration.');
+      process.exitCode = 1;
+      throw new Error('server bundle missing after bundling');
+    }
+  }
 } catch (error) {
   console.error('Failed to bundle Gemini CLI MCP extension:', error);
   process.exitCode = 1;

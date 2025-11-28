@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events';
+
 export type JobHandler = (signal: AbortSignal) => Promise<void>;
 
 interface JobEntry {
@@ -13,9 +15,17 @@ export class WorkerPool {
     private queue: JobEntry[] = [];
     private nextId = 0;
     private active = new Map<number, JobEntry>();
+    private readonly emitter = new EventEmitter();
 
     constructor(concurrency: number) {
         this.concurrency = Math.max(1, concurrency);
+    }
+
+    // Allow external code to subscribe to lifecycle events. We emit 'changed'
+    // whenever the running count changes, and 'queue' when the queue length
+    // changes (enqueue/cancel).
+    on(event: string, cb: () => void) {
+        this.emitter.on(event as any, cb);
     }
 
     enqueue(handler: JobHandler, priority = 0): number {
@@ -32,6 +42,7 @@ export class WorkerPool {
             }
             return b.priority - a.priority;
         });
+        this.emitter.emit('queue');
         this.pump();
         return entry.id;
     }
@@ -41,6 +52,7 @@ export class WorkerPool {
             if (entry.id === jobId) {
                 entry.controller.abort();
                 this.queue = this.queue.filter(item => item.id !== jobId);
+                this.emitter.emit('queue');
                 return;
             }
         }
@@ -57,6 +69,8 @@ export class WorkerPool {
         }
         this.queue = [];
         this.active.clear();
+        this.emitter.emit('queue');
+        this.emitter.emit('changed');
     }
 
     queuedCount() {
@@ -80,6 +94,7 @@ export class WorkerPool {
                 continue;
             }
             this.running += 1;
+            this.emitter.emit('changed');
             this.active.set(entry.id, entry);
             entry.handler(entry.controller.signal)
                 .catch((error) => {
@@ -88,6 +103,7 @@ export class WorkerPool {
                 .finally(() => {
                     this.active.delete(entry.id);
                     this.running -= 1;
+                    this.emitter.emit('changed');
                     this.pump();
                 });
         }
