@@ -26,7 +26,7 @@ async function buildMcpDefinitions(
 
 	// If CLI is unhealthy, return empty but log reason for diagnosis
 	if (!cliHealth.isHealthy()) {
-		console.warn('Gemini MCP: CLI not healthy; no MCP servers will be provided');
+		output.appendLine('Gemini MCP: CLI not healthy; no MCP servers will be provided');
 		return servers;
 	}
 
@@ -136,7 +136,7 @@ async function buildMcpDefinitions(
 		def.cwd = vscode.Uri.file(serverCwd);
 		servers.push(def);
 	} catch (err) {
-		console.error('Gemini MCP: failed to create MCP server definition', err);
+		output.appendLine(`Gemini MCP: failed to create MCP server definition ${String(err)}`);
 	}
 
 	return servers;
@@ -150,7 +150,12 @@ export function activate(context: vscode.ExtensionContext) {
 	statusItem.show();
 	context.subscriptions.push(statusItem);
 
-	const cliHealth = new GeminiCliHealth();
+	// Create an output channel for detailed diagnostics early so other
+	// components (like GeminiCliHealth) can write diagnostic messages.
+	const output = vscode.window.createOutputChannel('Gemini CLI MCP');
+	context.subscriptions.push(output);
+
+	const cliHealth = new GeminiCliHealth(output);
 	context.subscriptions.push(cliHealth);
 
 	// Log CLI health changes to the output channel for diagnostics
@@ -170,9 +175,6 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusMonitor = new TaskStatusMonitor(context, statusItem, taskTreeProvider, cliHealth);
 	context.subscriptions.push(statusMonitor);
 
-	// Create an output channel for detailed diagnostics
-	const output = vscode.window.createOutputChannel('Gemini CLI MCP');
-	context.subscriptions.push(output);
 	const initialConfig = readConfig();
 	const initialHealthCheck = cliHealth.refresh(initialConfig);
 

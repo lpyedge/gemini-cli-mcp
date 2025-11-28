@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSpawnCommand, setGeminiBin } from '../dist/index.js';
+// Ensure a workspace CWD is present when importing the bundled helpers during tests.
+import os from 'node:os';
+process.env.GEMINI_TASK_CWD = process.env.GEMINI_TASK_CWD || os.tmpdir();
+import { buildSpawnCommand, setGeminiBin } from '../dist/spawnHelpers.js';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from '../dist/processUtils.js';
 

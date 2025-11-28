@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import { CliHealthState, CliStatusSnapshot, GeminiConfig } from './types';
 
 // Manages checking the Gemini CLI health and exposing a change event.
@@ -12,6 +13,11 @@ export class GeminiCliHealth implements vscode.Disposable {
     private lastConfigKey: string | undefined;
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     readonly onDidChange = this.onDidChangeEmitter.event;
+    private readonly output?: vscode.OutputChannel;
+
+    constructor(output?: vscode.OutputChannel) {
+        this.output = output;
+    }
 
     dispose() {
         this.onDidChangeEmitter.dispose();
@@ -40,16 +46,72 @@ export class GeminiCliHealth implements vscode.Disposable {
         }
         this.status = { state: 'checking', message: 'Checking Gemini CLI...' };
         this.onDidChangeEmitter.fire();
-        // Short-circuit if geminiPath is not configured or missing on disk
+        // Diagnostic: report platform and configured geminiPath to help debug
+        try {
+            const msg = `Gemini CLI health check: platform=${process.platform} arch=${process.arch} configuredGeminiPath=${String(
+                config.geminiPath
+            )}`;
+            if (this.output) {
+                this.output.appendLine(msg);
+            } else {
+                console.log(msg);
+            }
+        } catch (e) {
+            // ignore logging errors
+        }
+        // Short-circuit if geminiPath is not configured. If a simple command
+        // name is provided (e.g. `gemini`), do NOT perform a raw filesystem
+        // existence check because the executable may be resolved via PATH.
+        // Only perform fs.existsSync for explicit paths (absolute or containing
+        // path separators) to avoid false negatives when users configure the
+        // command name instead of an absolute path.
         if (!config.geminiPath) {
             this.status = { state: 'missing', message: 'geminiPath not configured' };
             this.onDidChangeEmitter.fire();
             return Promise.resolve();
         }
-        if (!fs.existsSync(config.geminiPath)) {
-            this.status = { state: 'missing', message: `geminiPath not found: ${config.geminiPath}` };
-            this.onDidChangeEmitter.fire();
-            return Promise.resolve();
+        const looksLikePath = path.isAbsolute(config.geminiPath) || config.geminiPath.includes(path.sep) || config.geminiPath.includes('/');
+        if (looksLikePath && !fs.existsSync(config.geminiPath)) {
+            // Configured path looks like an explicit path but the file is missing.
+            // Do NOT immediately fail; try a shell-based lookup (e.g. `cmd /c`) using
+            // the basename of the configured value so that PATH-resolved installs
+            // can still be detected. Log the situation for diagnostics.
+            try {
+                const warn = `Configured geminiPath not found on disk: ${config.geminiPath}. Will attempt shell lookup.`;
+                if (this.output) {
+                    this.output.appendLine(`WARN: ${warn}`);
+                } else {
+                    console.warn(warn);
+                }
+            } catch (e) {
+                /* ignore */
+            }
+            const fallbackCmd = path.basename(config.geminiPath || 'gemini');
+            // Attempt to execute fallback command via shell resolution.
+            this.checking = this.executeVersion({ ...config, geminiPath: fallbackCmd })
+                .then((versionInfo) => {
+                    const version = versionInfo.trim() || 'Gemini CLI';
+                    this.status = {
+                        state: 'ok',
+                        message: version,
+                        version,
+                        lastChecked: Date.now()
+                    };
+                })
+                .catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    const state = this.classifyFailure(message);
+                    this.status = {
+                        state,
+                        message,
+                        lastChecked: Date.now()
+                    };
+                })
+                .finally(() => {
+                    this.checking = undefined;
+                    this.onDidChangeEmitter.fire();
+                });
+            return this.checking;
         }
 
         this.checking = this.executeVersion(config)
