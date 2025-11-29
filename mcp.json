@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "0.2.3",
   "name": "gemini-cli-mcp",
   "description": "MCP manifest describing the Gemini CLI MCP surface exposed by this extension",
   "tools": [

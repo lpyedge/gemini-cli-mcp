@@ -1,7 +1,7 @@
 {
   "name": "gemini-cli-mcp",
   "publisher": "lpyedge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "displayName": "Gemini CLI MCP",
   "description": "VS Code MCP plugin that lets GitHub Copilot orchestrate local Gemini CLI workers for repetitive automation tasks.",
