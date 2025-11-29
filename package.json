@@ -5,7 +5,7 @@
   "private": true,
   "displayName": "Gemini CLI MCP",
   "description": "VS Code MCP plugin that lets GitHub Copilot orchestrate local Gemini CLI workers for repetitive automation tasks.",
-  "main": "./dist/extension.js",
+  "main": "dist/extension.js",
   "repository": {
     "type": "git",
     "url": "https://github.com/lpyedge/gemini-cli-mcp.git"
@@ -15,7 +15,7 @@
     "bundle": "node scripts/bundle.mjs",
     "compile": "npm run typecheck && npm run bundle",
     "watch": "node scripts/bundle.mjs --watch",
-    "package": "npm run compile && node -e \"require('fs').mkdirSync('dist',{recursive:true});\" && vsce package --out dist/gemini-cli-mcp.vsix",
+    "package": "npm run compile && node scripts/clean-dist.mjs && node -e \"require('fs').mkdirSync('dist',{recursive:true});\" && vsce package --out dist/gemini-cli-mcp.vsix",
     "test": "node -r ./test/setup-vscode-mock.cjs scripts/run-all-tests.mjs"
   },
   "engines": {
@@ -224,7 +224,12 @@
     "zod": "^3.23.8"
   },
   "files": [
-    "dist/**",
-    "server/dist/**"
+    "dist/extension.js",
+    "server/dist/index.js",
+    "server/dist/spawnHelpers.js",
+    "package.json",
+    "LICENSE",
+    "README.md",
+    "mcp.json"
   ]
 }

@@ -8,17 +8,21 @@ test/**
 tests/**
 test-temp/**
 .github/**
-README.md
 CHANGELOG.md
 mcp.sample.json
-LICENSE
 tsconfig.json
 server/tsconfig.json
 package-lock.json
-dist/*.vsix
-# 保留必要的 dist、package.json、mcp.json
-!dist/**
-!server/dist/**
+# exclude source maps
+**/*.map
+*.map
+# exclude the whole dist folders by default, then allow only the specific bundles
+dist/**
+server/dist/**
+# keep license file in package
+!LICENSE
+!dist/extension.js
+!server/dist/index.js
+!server/dist/spawnHelpers.js
 !package.json
 !mcp.json
-!server/package.json
