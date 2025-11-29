@@ -1,7 +1,11 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
+// Use runtime `require` to load the `vscode` extension API lazily.
+// We avoid `import.meta.url` here because this file is compiled to
+// CommonJS output by the build and `import.meta` usage causes TS1470.
+declare const require: any;
 import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { CliHealthState, CliStatusSnapshot, GeminiConfig } from './types';
 
 // Manages checking the Gemini CLI health and exposing a change event.
@@ -12,12 +16,21 @@ export class GeminiCliHealth implements vscode.Disposable {
     private checking: Promise<void> | undefined;
     private lastConfigKey: string | undefined;
     private readonly DEBOUNCE_MS = 3000;
-    private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
-    readonly onDidChange = this.onDidChangeEmitter.event;
+    private readonly onDidChangeEmitter: vscode.EventEmitter<void>;
+    readonly onDidChange: vscode.Event<void>;
     private readonly output?: vscode.OutputChannel;
 
     constructor(output?: vscode.OutputChannel) {
         this.output = output;
+        // Load the runtime `vscode` module lazily to avoid require-cycle
+        // problems during tests that may preload an alternate implementation.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-var-requires
+        const vr = require('vscode') as typeof import('vscode');
+        // initialize EventEmitter lazily at runtime to avoid require-cycles when
+        // tests preload a CJS mock for 'vscode'.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        this.onDidChangeEmitter = new vr.EventEmitter<void>();
+        this.onDidChange = this.onDidChangeEmitter.event;
     }
 
     dispose() {

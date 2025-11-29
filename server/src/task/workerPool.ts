@@ -15,6 +15,7 @@ export class WorkerPool {
     private queue: JobEntry[] = [];
     private nextId = 0;
     private active = new Map<number, JobEntry>();
+    private history = new Map<number, JobEntry>();
     private readonly emitter = new EventEmitter();
     private lock = false; // 防止競態
 
@@ -66,6 +67,8 @@ export class WorkerPool {
         for (const entry of this.queue) {
             if (entry.id === jobId) {
                 entry.controller.abort();
+                // move cancelled entry into history so it can be retried later
+                this.history.set(entry.id, entry);
                 this.queue = this.queue.filter(item => item.id !== jobId);
                 this.emitter.emit('queue');
                 found = true;
@@ -76,6 +79,8 @@ export class WorkerPool {
             const running = this.active.get(jobId);
             if (running) {
                 running.controller.abort();
+                // keep a record so retry() can locate it after it finishes
+                this.history.set(jobId, running);
                 found = true;
             }
         }
@@ -126,6 +131,8 @@ export class WorkerPool {
                     })
                     .finally(() => {
                         this.active.delete(entry.id);
+                            // record finished job so retry can reference it later
+                            this.history.set(entry.id, entry);
                         this.running -= 1;
                         this.emitter.emit('changed');
                         this.pump();
@@ -140,10 +147,13 @@ export class WorkerPool {
      * 重試指定 jobId（僅限已取消/失敗/完成的任務）
      */
     retry(jobId: number): number | undefined {
-        const old = this.active.get(jobId) || this.queue.find(e => e.id === jobId);
+        const old = this.active.get(jobId) || this.queue.find(e => e.id === jobId) || this.history.get(jobId);
         if (!old) return undefined;
-        // 只允許重試已完成/失敗/取消的任務
-        if (!old.controller.signal.aborted) return undefined;
+        // Allow retry for cancelled/finished/failed tasks. If the controller is aborted
+        // the job was cancelled; otherwise allow retry if it's not currently active or queued.
+        const isQueued = this.queue.some(e => e.id === jobId);
+        const isActive = this.active.has(jobId);
+        if (!(old.controller.signal.aborted || (!isActive && !isQueued))) return undefined;
         return this.enqueueWithDelay(old.handler, old.priority);
     }
 }

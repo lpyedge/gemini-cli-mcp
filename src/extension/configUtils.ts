@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
-import path from 'node:path';
-import os from 'node:os';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
-import { GeminiConfig, TimeoutConfig, PriorityConfig, ModelBridgeConfig, ModelBridgeMode } from './types';
+import { GeminiConfig, TimeoutConfig, PriorityConfig, ModelBridgeConfig } from './types';
+import { getToolNames } from './mcpManifest';
 
 // Utility helpers for reading extension configuration and small format helpers.
 
@@ -28,27 +29,14 @@ export function readConfig(): GeminiConfig {
         codeFormat: config.get<number>('defaultPriorities.codeFormat', 0),
         taskSubmit: config.get<number>('defaultPriorities.taskSubmit', 0)
     };
-    const defaultAllowedTools = [
-        'gemini.task.submit',
-        'gemini.task.suggest',
-        'gemini.task.list',
-        'gemini.task.status',
-        'gemini.task.tail',
-        'gemini.task.cancel',
-        'gemini.task.prune',
-        'fs.read',
-        'fs.write',
-        'code.analyze',
-        'code.format.batch',
-        'tests.run'
-    ];
-    const mode = config.get<ModelBridgeMode>('modelBridge.mode', 'stdio');
+    // Load allowed tool names from the canonical `mcp.json` manifest.
+    // Do NOT fall back to a hard-coded static list — keep `mcp.json` as the single source of truth.
+    const manifestToolNames = getToolNames();
+    const defaultAllowedTools = manifestToolNames ?? [];
     const modelBridge: ModelBridgeConfig = {
         enabled: config.get<boolean>('modelBridge.enabled', false),
-        mode,
-        httpPort: config.get<number>('modelBridge.httpPort', 46871),
         stdioPath: config.get<string>('modelBridge.stdioPath', DEFAULT_STDIO_PATH),
-        authToken: config.get<string>('modelBridge.authToken', ''),
+        
         allowedTools: config.get<string[]>('modelBridge.allowedTools', defaultAllowedTools),
         allowOrchestrator: config.get<boolean>('modelBridge.allowOrchestrator', true),
         requestTimeoutMs: config.get<number>('modelBridge.requestTimeoutMs', 120000),

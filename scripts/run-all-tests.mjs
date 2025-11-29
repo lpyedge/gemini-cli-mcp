@@ -26,13 +26,11 @@ if (tscJs) {
   const tscBin = path.join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc');
   run(tscBin, ['-p', 'server'], { env: serverEnv, cwd: repoRoot });
 }
-run(process.execPath, ['-r', './test/setup-vscode-mock.cjs', '--test', 'server'], { env: serverEnv, cwd: repoRoot });
-
-console.log('Running root tests');
-// Run root tests (tests under ./test)
-run(process.execPath, ['-r', './test/setup-vscode-mock.cjs', '--test'], { env: process.env, cwd: repoRoot });
-// Also explicitly run the modelbridge sdk id integration test to ensure
-// the test is executed across CI or environments where discovery may differ.
-run(process.execPath, ['-r', './test/setup-vscode-mock.cjs', '--test', 'test/modelbridge-sdkid.test.mjs'], { env: process.env, cwd: repoRoot });
+// We only need to compile the server TS and then run the unified test suite
+console.log('Running root tests (all tests under ./test)');
+// Use ts-node ESM loader so tests can import TypeScript sources directly.
+// Prepend a small loader that maps the 'vscode' specifier to our local mock.
+// We no longer use the CJS preload; the ESM loader-only approach will be used.
+run(process.execPath, ['--loader', './test/loader-vscode-mock.mjs', '--loader', 'ts-node/esm', '--test'], { env: process.env, cwd: repoRoot });
 
 console.log('All tests passed.');

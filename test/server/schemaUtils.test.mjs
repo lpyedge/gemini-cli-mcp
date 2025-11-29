@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { dereferenceSchema, jsonSchemaToZod } from '../dist/lib/schemaUtils.js';
+import { dereferenceSchema, jsonSchemaToZod } from '../../server/src/lib/schemaUtils.ts';
 
 test('dereference internal $defs and convert to zod', async () => {
   const manifest = {

@@ -4,103 +4,182 @@
   "description": "MCP manifest describing the Gemini CLI MCP surface exposed by this extension",
   "tools": [
     {
-      "name": "gemini.task.submit",
-      "title": "Submit Task",
-      "description": "Submit a long-running Gemini CLI task. Returns a taskId for tracking.",
+      "name": "dev.summarizeCode",
+      "title": "Summarize Code",
+      "description": "Generate a short summary of the specified source file or code snippet (3-5 sentences or bullet points).",
       "arguments": {
         "type": "object",
         "properties": {
-          "tool": { "type": "string" },
-          "args": { "type": "object" },
-          "priority": { "type": "integer" },
-          "timeoutMs": { "type": "integer" }
+          "inputType": { "type": "string", "enum": ["path", "text"], "default": "path" },
+          "path": { "type": "string" },
+          "content": { "type": "string" }
         },
-        "required": ["tool"]
+        "required": ["inputType"]
+      },
+      "returns": { "type": "object", "properties": { "summary": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.explainSnippet",
+      "title": "Explain Snippet",
+      "description": "Provide a step-by-step or line-by-line explanation of the given code snippet.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "language": { "type": "string" }
+        },
+        "required": ["content"]
+      },
+      "returns": { "type": "object", "properties": { "explanation": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.generateComments",
+      "title": "Generate Comments",
+      "description": "Insert detailed comments and documentation for the selected code. Returns the code with inline and/or header comments added.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "language": { "type": "string", "default": "auto" },
+          "style": { "type": "string", "enum": ["brief", "detailed"], "default": "detailed" }
+        },
+        "required": ["content"]
+      },
+      "returns": { "type": "object", "properties": { "commentedCode": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.refactorCode",
+      "title": "Refactor Code",
+      "description": "Refactor the provided code according to the requested goal (e.g. split function, improve performance). Returns refactored code or a diff.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "goal": { "type": "string" },
+          "format": { "type": "string", "enum": ["full", "diff"], "default": "full" }
+        },
+        "required": ["content","goal"]
+      },
+      "returns": { "type": "object", "properties": { "refactored": { "type": "string" }, "diff": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.extractInterface",
+      "title": "Extract Interface",
+      "description": "Infer and extract an interface or type definition from the given implementation code. Returns the generated interface/type text.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "target": { "type": "string", "enum": ["TypeScript","Go","Java"], "default": "TypeScript" }
+        },
+        "required": ["content"]
+      },
+      "returns": { "type": "object", "properties": { "interface": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.generateTests",
+      "title": "Generate Tests",
+      "description": "Generate unit tests for the provided code, targeting a specified test framework.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "framework": { "type": "string", "default": "node:test" },
+          "language": { "type": "string", "default": "auto" }
+        },
+        "required": ["content"]
+      },
+      "returns": { "type": "object", "properties": { "tests": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    },
+    {
+      "name": "dev.translateCode",
+      "title": "Translate Code",
+      "description": "Translate code from one language to another while preserving functionality; returns translated code and optional notes about assumptions.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "targetLanguage": { "type": "string" },
+          "notes": { "type": "boolean", "default": true }
+        },
+        "required": ["content","targetLanguage"]
+      },
+      "returns": { "type": "object", "properties": { "translated": { "type": "string" }, "notes": { "type": "string" } } },
+      "metadata": { "autoInvoke": true }
+    }
+    ,
+    {
+      "name": "web.findCodeExample",
+      "title": "Find Code Example",
+      "description": "Search the public web for code examples that implement a requested feature or API; useful as implementation reference.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "language": { "type": "string" },
+          "maxResults": { "type": "integer", "default": 5 },
+          "includeSnippets": { "type": "boolean", "default": true }
+        },
+        "required": ["query"]
       },
       "returns": {
         "type": "object",
         "properties": {
-          "taskId": { "type": "string" },
-          "logUri": { "type": "string" }
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string" },
+                "snippet": { "type": "string" },
+                "url": { "type": "string" },
+                "source": { "type": "string" }
+              }
+            }
+          }
         }
-      }
+      },
+      "metadata": { "autoInvoke": true }
     },
     {
-      "name": "gemini.task.status",
-      "title": "Task Status",
-      "description": "Get current status/metadata for a submitted task.",
-      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" } }, "required": ["taskId"] },
-      "returns": { "type": "object" }
-    },
-    {
-      "name": "gemini.task.list",
-      "title": "List Tasks",
-      "description": "List recent tasks with optional filters.",
-      "arguments": { "type": "object", "properties": { "limit": { "type": "integer" }, "state": { "type": "string" } } },
-      "returns": { "type": "array" }
-    },
-    {
-      "name": "gemini.task.tail",
-      "title": "Tail Task Log",
-      "description": "Tail incremental logs for a task; returns chunks and next offset.",
-      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" }, "offset": { "type": "integer" } }, "required": ["taskId"] },
-      "returns": { "type": "object", "properties": { "chunk": { "type": "string" }, "nextOffset": { "type": "integer" }, "done": { "type": "boolean" } } }
-    },
-    {
-      "name": "gemini.task.cancel",
-      "title": "Cancel Task",
-      "description": "Request cancellation of a running or queued task.",
-      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" } }, "required": ["taskId"] },
-      "returns": { "type": "object" }
-    },
-    {
-      "name": "gemini.task.prune",
-      "title": "Prune Tasks",
-      "description": "Prune completed tasks and old logs from storage.",
-      "arguments": { "type": "object", "properties": { "olderThanDays": { "type": "integer" } } },
-      "returns": { "type": "object" }
-    },
-    {
-      "name": "gemini.task.suggest",
-      "title": "Suggest Tasks",
-      "description": "Return suggested tasks or automation hints for the repository.",
-      "arguments": { "type": "object", "properties": { "limit": { "type": "integer" } } },
-      "returns": { "type": "array" }
-    },
-    {
-      "name": "fs.read",
-      "title": "Read File",
-      "description": "Read file contents from the task working directory. Returned content is a text blob.",
-      "arguments": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] },
-      "returns": { "type": "object", "properties": { "content": { "type": "string" } } }
-    },
-    {
-      "name": "fs.write",
-      "title": "Write File",
-      "description": "Write file contents to the task working directory. Overwrites by default.",
-      "arguments": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" }, "encoding": { "type": "string" } }, "required": ["path","content"] },
-      "returns": { "type": "object" }
-    },
-    {
-      "name": "code.analyze",
-      "title": "Code Analyze",
-      "description": "Perform code analysis on the given paths and return findings or a taskId for long analyses.",
-      "arguments": { "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } }, "prompt": { "type": "string" } }, "required": ["paths"] },
-      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" } } }, { "type": "object" } ] }
-    },
-    {
-      "name": "code.format.batch",
-      "title": "Code Format Batch",
-      "description": "Format code files in batch; may return a taskId for long runs.",
-      "arguments": { "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } }, "style": { "type": "string" } }, "required": ["paths"] },
-      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" } } }, { "type": "object" } ] }
-    },
-    {
-      "name": "tests.run",
-      "title": "Run Tests",
-      "description": "Execute the project's tests. Returns a taskId and location of logs for long-running runs.",
-      "arguments": { "type": "object", "properties": { "command": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["command"] },
-      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" }, "logUri": { "type": "string" } } }, { "type": "object" } ] }
+      "name": "web.findLibraryUsage",
+      "title": "Find Library / Component Usage",
+      "description": "Search the web for documentation, usage examples, and API references for a given library, component, or plugin.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "packageName": { "type": "string" },
+          "query": { "type": "string" },
+          "maxResults": { "type": "integer", "default": 10 },
+          "includeDocs": { "type": "boolean", "default": true }
+        },
+        "required": ["packageName"]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "package": { "type": "string" },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string" },
+                "summary": { "type": "string" },
+                "url": { "type": "string" },
+                "kind": { "type": "string", "description": "e.g., docs, example, repo, blog" }
+              }
+            }
+          }
+        }
+      },
+      "metadata": { "autoInvoke": true }
     }
   ],
   "resources": [

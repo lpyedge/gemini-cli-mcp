@@ -1,17 +1,24 @@
 import * as vscode from 'vscode';
 import { getMcpClient, callTool, closeMcpClient } from './mcpClient';
+import { getToolNames, getToolSampleArgs } from './mcpManifest';
 
 type Submission = { label: string; tool: string; args?: any };
 
 export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
-  const submissions: Submission[] = [
-    { label: 'analyze-cliHealth', tool: 'code.analyze', args: { paths: ['src/extension/cliHealth.ts'], prompt: 'Review CLI health check' } },
-    { label: 'analyze-server', tool: 'code.analyze', args: { paths: ['server/src/server/index.ts'], prompt: 'Review server lifecycle and persistence' } },
-    { label: 'analyze-extension', tool: 'code.analyze', args: { paths: ['src/extension.ts'], prompt: 'Review activation and provider wiring' } },
-    { label: 'run-tests', tool: 'tests.run', args: { command: 'npm', args: ['test'] } },
-    { label: 'suggest-tasks', tool: 'gemini.task.suggest', args: { limit: 5 } },
-    { label: 'list-tasks', tool: 'gemini.task.list', args: { limit: 10 } }
-  ];
+  // Create example submissions — prefer generating from `mcp.json` so the manifest
+  // is the single source of truth. Fall back to an inline list if manifest is missing.
+  const manifestToolNames = getToolNames();
+  if (!manifestToolNames || manifestToolNames.length === 0) {
+    output.appendLine('Orchestrator: no tools found in mcp.json; aborting orchestrator run.');
+    // Close client if it was opened by getMcpClient earlier; ensure we still call closeMcpClient.
+    await closeMcpClient();
+    return;
+  }
+  const submissions: Submission[] = manifestToolNames.map((tool) => {
+    const sample = getToolSampleArgs(tool) ?? {};
+    const label = tool.replace(/\./g, '-');
+    return { label, tool, args: sample };
+  });
 
   output.appendLine(`Orchestrator: submitting ${submissions.length} tasks concurrently`);
 
@@ -34,25 +41,40 @@ export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
       tasks.push({ label: s.label, error: s.error });
       continue;
     }
-        let first: any = undefined;
-        if (Array.isArray(s.res?.result?.content)) {
-          first = s.res.result.content.find((c: any) => c.type === 'text');
+    // Normalize various possible result shapes from tools.
+    const raw = s.res?.result ?? s.res;
+    // 1) If the tool returned an MCP-style content array (long-running task metadata)
+    if (Array.isArray(raw?.content)) {
+      const firstText = raw.content.find((c: any) => c && c.type === 'text' && c.text)?.text;
+      if (firstText) {
+        try {
+          const parsed = JSON.parse(firstText);
+          if (parsed?.taskId) {
+            tasks.push({ label: s.label, taskId: parsed.taskId });
+            output.appendLine(`Orchestrator: ${s.label} -> task ${parsed.taskId}`);
+            continue;
+          }
+          tasks.push({ label: s.label, immediate: parsed });
+          continue;
+        } catch {
+          tasks.push({ label: s.label, immediate: firstText });
+          continue;
         }
-    if (!first || !first.text) {
-      tasks.push({ label: s.label, immediate: s.res });
+      }
+    }
+    // 2) If result contains a direct taskId
+    if (raw && typeof raw === 'object' && raw.taskId) {
+      tasks.push({ label: s.label, taskId: String(raw.taskId) });
+      output.appendLine(`Orchestrator: ${s.label} -> task ${raw.taskId}`);
       continue;
     }
-    try {
-      const parsed = JSON.parse(first.text);
-      if (parsed?.taskId) {
-        tasks.push({ label: s.label, taskId: parsed.taskId });
-        output.appendLine(`Orchestrator: ${s.label} -> task ${parsed.taskId}`);
-      } else {
-        tasks.push({ label: s.label, immediate: parsed });
-      }
-    } catch (e) {
-      tasks.push({ label: s.label, immediate: first.text });
+    // 3) Common direct returns for dev/web helpers
+    if (raw && (raw.summary || raw.explanation || raw.commentedCode || raw.refactored || raw.tests || raw.translated)) {
+      tasks.push({ label: s.label, immediate: raw });
+      continue;
     }
+    // 4) Fallback: include the whole response
+    tasks.push({ label: s.label, immediate: s.res });
   }
 
   const waiters = tasks.filter((t) => t.taskId).map(async (t) => {

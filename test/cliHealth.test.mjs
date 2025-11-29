@@ -3,14 +3,18 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const { GeminiCliHealth } = require('../dist/extension/cliHealth.js');
+// Import the TypeScript source directly under ESM loader so tests run
+// without relying on the compiled CJS bundle or a CJS preload shim.
+async function loadGeminiCliHealth() {
+  const mod = await import('../src/extension/cliHealth.ts');
+  // support both named and default exports
+  return mod.GeminiCliHealth ?? mod.default?.GeminiCliHealth ?? mod.default ?? mod;
+}
 
 test('GeminiCliHealth: node (in PATH) should be recognized as ok', async () => {
   const outputLines = [];
   const fakeOutput = { appendLine: (s) => outputLines.push(String(s)) };
+  const GeminiCliHealth = await loadGeminiCliHealth();
   const h = new GeminiCliHealth(fakeOutput);
   // Use 'node' (available on PATH) to avoid shell quoting issues with absolute paths
   const cfg = { geminiPath: 'node', taskCwd: os.tmpdir() };
@@ -23,6 +27,7 @@ test('GeminiCliHealth: node (in PATH) should be recognized as ok', async () => {
 test('GeminiCliHealth: nonexistent explicit path results in missing', async () => {
   const outputLines = [];
   const fakeOutput = { appendLine: (s) => outputLines.push(String(s)) };
+  const GeminiCliHealth = await loadGeminiCliHealth();
   const h = new GeminiCliHealth(fakeOutput);
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'gemini-test-'));
   try {

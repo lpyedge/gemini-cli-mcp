@@ -1,6 +1,6 @@
-const path = require('path');
+import path from 'node:path';
 
-class EventEmitter {
+export class EventEmitter {
   constructor() {
     this._listeners = [];
   }
@@ -16,7 +16,7 @@ class EventEmitter {
   dispose() {}
 }
 
-class McpStdioServerDefinition {
+export class McpStdioServerDefinition {
   constructor(id, command, args, env, version) {
     this.id = id;
     this.command = command;
@@ -27,7 +27,7 @@ class McpStdioServerDefinition {
   }
 }
 
-class TreeItem {
+export class TreeItem {
   constructor(label, options = {}) {
     this.label = label;
     this.description = options.description;
@@ -37,13 +37,13 @@ class TreeItem {
   }
 }
 
-const TreeItemCollapsibleState = {
+export const TreeItemCollapsibleState = {
   None: 0,
   Collapsed: 1,
   Expanded: 2,
 };
 
-const window = {
+export const window = {
   createOutputChannel: (name) => ({
     appendLine: (s) => { /* keep quiet in tests */ },
     show: () => {},
@@ -53,7 +53,7 @@ const window = {
   registerTreeDataProvider: () => ({ dispose: () => {} })
 };
 
-const workspace = {
+export const workspace = {
   workspaceFolders: [{ uri: { fsPath: process.cwd() } }],
   fs: {
     readFile: async () => { throw new Error('workspace.fs.readFile not implemented in vscode mock'); }
@@ -63,22 +63,22 @@ const workspace = {
   getConfiguration: () => ({ get: () => undefined })
 };
 
-const commands = {
+export const commands = {
   registerCommand: () => ({ dispose: () => {} }),
   executeCommand: async () => {}
 };
 
-const Uri = {
+export const Uri = {
   file: (fsPath) => ({ fsPath }),
   joinPath: (uri, ...parts) => ({ fsPath: path.join(uri.fsPath, ...parts) }),
   parse: (s) => ({ fsPath: s })
 };
 
-const lm = {
+export const lm = {
   registerMcpServerDefinitionProvider: (id, provider) => ({ dispose: () => {} })
 };
 
-module.exports = {
+export default {
   EventEmitter,
   McpStdioServerDefinition,
   TreeItem,

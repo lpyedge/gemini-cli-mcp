@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { terminateProcessTree } from '../dist/processUtils.js';
+import { terminateProcessTree } from '../../server/src/gemini/processUtils.ts';
 
 test('terminateProcessTree kills child process', async () => {
   const child = spawn(process.execPath, ['-e', "setTimeout(()=>{},10000)"] , { stdio: 'ignore' });

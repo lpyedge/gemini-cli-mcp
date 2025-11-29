@@ -5,10 +5,10 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { terminateProcessTree } from '../dist/processUtils.js';
+import { terminateProcessTree } from '../../server/src/gemini/processUtils.ts';
 // Ensure a workspace CWD is present when importing the bundled module during tests.
 process.env.GEMINI_TASK_CWD = process.env.GEMINI_TASK_CWD || os.tmpdir();
-import { buildSpawnCommand, setGeminiBin } from '../dist/spawnHelpers.js';
+import { buildSpawnCommand, setGeminiBin } from '../../server/src/gemini/spawnHelpers.ts';
 
 // This test reproduces a Windows .cmd shim that uses `start` to launch a detached
 // node process and then exits immediately. We validate that the server's

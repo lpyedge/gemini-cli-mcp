@@ -16,7 +16,7 @@
     "compile": "npm run typecheck && npm run bundle",
     "watch": "node scripts/bundle.mjs --watch",
     "package": "npm run compile && node scripts/clean-dist.mjs && node -e \"require('fs').mkdirSync('dist',{recursive:true});\" && vsce package --out dist/gemini-cli-mcp.vsix",
-    "test": "node -r ./test/setup-vscode-mock.cjs scripts/run-all-tests.mjs"
+    "test": "node scripts/run-all-tests.mjs"
   },
   "engines": {
     "vscode": ">=1.105.0"
@@ -118,21 +118,15 @@
         },
         "geminiMcp.modelBridge.enabled": {
           "type": "boolean",
-          "default": false,
-          "description": "Enable the HTTP automation bridge so local AI agents (Copilot, Copilot Chat, local models) can submit MCP tool calls programmatically."
+          "default": true,
+          "description": "Enable the local model automation bridge (stdio/socket) so local agents can submit MCP tool calls programmatically."
         },
-        "geminiMcp.modelBridge.httpPort": {
-          "type": "number",
-          "default": 46871,
-          "minimum": 1024,
-          "maximum": 65535,
-          "description": "HTTP port that the automation bridge listens on for POST /call-tool and /orchestrate requests."
-        },
-        "geminiMcp.modelBridge.authToken": {
+        "geminiMcp.modelBridge.stdioPath": {
           "type": "string",
           "default": "",
-          "description": "Optional bearer token that incoming automation bridge calls must present via x-gemini-mcp-token or Authorization headers."
+          "description": "Optional path for the local stdio/socket listener. Leave empty to use a workspace-derived default path."
         },
+        
         "geminiMcp.modelBridge.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
@@ -150,21 +144,8 @@
           "items": {
             "type": "string"
           },
-          "default": [
-            "gemini.task.submit",
-            "gemini.task.suggest",
-            "gemini.task.list",
-            "gemini.task.status",
-            "gemini.task.tail",
-            "gemini.task.cancel",
-            "gemini.task.prune",
-            "fs.read",
-            "fs.write",
-            "code.analyze",
-            "code.format.batch",
-            "tests.run"
-          ],
-          "description": "Whitelist of MCP tools available to automation bridge callers; leave empty to allow all registered tools."
+          "default": [],
+          "description": "Whitelist of MCP tools available to automation bridge callers; defaults to empty so the extension will load available tools from the workspace `mcp.json` manifest when present."
         },
         "geminiMcp.modelBridge.allowOrchestrator": {
           "type": "boolean",
@@ -216,8 +197,10 @@
     "concurrently": "^9.1.0",
     "esbuild": "^0.27.0",
     "typescript": "^5.6.3",
+    "ts-node": "^10.9.1",
     "vsce": "^2.15.0"
   },
+  "optionalDependencies": {},
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.1.2",
     "json-schema-to-zod": "^2.7.0",

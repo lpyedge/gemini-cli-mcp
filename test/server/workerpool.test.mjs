@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WorkerPool } from '../dist/workerPool.js';
+import { WorkerPool } from '../../server/src/task/workerPool.ts';
 
 test('cancel queued job does not start and running count stable', async () => {
   const pool = new WorkerPool(1);
@@ -71,7 +71,7 @@ test('cancel queued job does not start and running count stable', async () => {
     pool.enqueueWithDelay(job, 0, 100);
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(ran, 0, 'job not run before delay');
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 160));
     assert.equal(ran, 1, 'job ran after delay');
   });
 

@@ -37,28 +37,14 @@ Changing any of these settings reloads the MCP provider and refreshes the worker
 
 ### Model Automation Bridge
 
-- `geminiMcp.modelBridge.enabled` (default `false`): enable the HTTP bridge so local AI agents (Copilot, Copilot Chat, or any MCP-aware tool) can call MCP tools directly instead of relying on VS Code commands.
-- `geminiMcp.modelBridge.port` (default `46871`): the local loopback port the bridge listens on for inbound requests.
-- `geminiMcp.modelBridge.authToken`: optional bearer token that callers must provide via `x-gemini-mcp-token` or `Authorization: Bearer ...` headers; leave empty to allow unmanaged callers only from trusted sessions.
+- `geminiMcp.modelBridge.stdioPath` (platform-dependent default): optional path for the local stdio/socket listener; when unset a workspace-derived socket path is used.
 - `geminiMcp.modelBridge.allowedTools`: whitelist of MCP tools that automation callers may invoke; leave empty to allow all registered tools (defaults include `gemini.task.*`, `fs.read`, `fs.write`, `code.analyze`, `code.format.batch`, `tests.run`).
-- `geminiMcp.modelBridge.allowOrchestrator` (default `true`): when `true`, the bridge also exposes `POST /orchestrate` so the orchestrated review workflow can be triggered programmatically.
+- `geminiMcp.modelBridge.allowOrchestrator` (default `true`): when `true`, the bridge also allows orchestrator requests so the orchestrated review workflow can be triggered programmatically.
+- `geminiMcp.modelBridge.requestTimeoutMs` (default `120000`): per-request timeout (ms) for proxied MCP tool calls; requests exceeding this will be canceled and return a timeout response.
+- `geminiMcp.modelBridge.captureSdkMessageId` (default `bestEffort`): how the extension captures SDK-assigned message ids for observability (`sdkHook` | `bestEffort` | `disabled`).
 
-#### HTTP API
 
-- `POST http://127.0.0.1:<port>/call-tool` – body `{ "toolName": "code.analyze", "args": { ... } }`. Returns the MCP tool response as JSON. The bridge enforces the configured token and allowed tool list.
-- `POST http://127.0.0.1:<port>/orchestrate` – kicks off the `gemini.task.*` orchestrator bundle; respects the same authentication token.
-- `GET http://127.0.0.1:<port>/health` – returns `{ "ok": true }` if the bridge is enabled; useful for agents to wait until the service is ready.
-
-#### Sample curl
-
-```
-curl -X POST http://127.0.0.1:46871/call-tool \
-	-H "Content-Type: application/json" \
-	-H "x-gemini-mcp-token: ${yourToken}" \
-	-d '{"toolName":"code.analyze","args":{"paths":["src/extension.ts"],"prompt":"Review activation"}}'
-```
-
-The bridge gives Copilot-style agents the same model/tool surface that the extension already exposes via `geminiMcp.orchestrateReview` and `geminiMcp.invokeTool`. Keeping the bridge loopback-only and optionally token-protected makes it safe to integrate with trusted automation agents that run on your machine.
+The bridge gives Copilot-style agents the same model/tool surface that the extension already exposes via `geminiMcp.orchestrateReview` and `geminiMcp.invokeTool`. The current implementation is a local stdio/socket bridge rather than an HTTP server, and it is intended for use by trusted local agents.
 
 ## Environment Variables (Server Side)
 
@@ -72,12 +58,21 @@ The server validates that `GEMINI_TASK_CWD` (or the resolved workspace root) liv
 
 ## MCP Surface
 
-- Orchestration: `gemini.task.submit`, `gemini.task.status`, `gemini.task.list`, `gemini.task.tail`, `gemini.task.cancel`, `gemini.task.prune`
-- Automation hints: `gemini.task.suggest`
-- File helpers: `fs.read`, `fs.write`
-- High-level tools: `code.analyze`, `code.format.batch`, `tests.run`
-- Resources: `tasks://{id}/log`, `tasks://{id}/summary`
+Developer helper tools (code intelligence and transformation):
+- `dev.summarizeCode` — summarize a source file or snippet (3-5 sentences / bullet points).
+- `dev.explainSnippet` — provide a step-by-step / line-by-line explanation of a code snippet.
+- `dev.generateComments` — generate detailed inline and header comments for provided code.
+- `dev.refactorCode` — refactor code according to a specified goal, returning refactored code or a diff.
+- `dev.extractInterface` — extract/infer an interface or type definition from implementation code.
+- `dev.generateTests` — generate unit tests targeting a specified framework.
+- `dev.translateCode` — translate code between languages while preserving functionality.
 
+Web lookup tools (search external references and examples):
+- `web.findCodeExample` — search the public web for code examples matching a feature or API query (returns snippets and links).
+- `web.findLibraryUsage` — search for documentation, usage examples and API references for a given library/component/plugin.
+
+- Resources: `tasks://{id}/log`, `tasks://{id}/summary`
+  
 All responses include `logUri` pointers so Copilot (or you) can stream output inside VS Code.
 
 ## Logs & Retention

@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { createPersistenceManager } from '../dist/task/persistenceManager.js';
-import { WorkerPool } from '../dist/workerPool.js';
+import { createPersistenceManager } from '../../server/src/task/persistenceManager.ts';
+import { WorkerPool } from '../../server/src/task/workerPool.ts';
 
 import { readStatusFile, waitForTaskCompletion, waitForStatusFileExists } from './helpers/testHelpers.mjs';
 

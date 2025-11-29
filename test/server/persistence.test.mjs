@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { persistTasksToFile, loadPersistedTasksFromFile } from '../dist/persistence.js';
+import { persistTasksToFile, loadPersistedTasksFromFile } from '../../server/src/task/persistence.ts';
 
 const tmpDir = path.join('test-temp');
 

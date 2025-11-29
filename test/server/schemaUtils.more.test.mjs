@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { jsonSchemaToZod } from '../dist/lib/schemaUtils.js';
+import { jsonSchemaToZod } from '../../server/src/lib/schemaUtils.ts';
 
 // Tests for jsonSchemaToZod features (enums, oneOf/anyOf, tuples, patterns, numbers, additionalProperties, uniqueItems, formats)
 

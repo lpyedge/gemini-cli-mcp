@@ -77,7 +77,7 @@ for (const [idx, evName] of EVENT_NAMES.entries()) {
 
     const captureMode = process.env.GEMINI_CAPTURE_MODE || 'sdkHook';
     const fakeConfigModule = {
-      readConfig: () => ({ modelBridge: { enabled: true, mode: 'stdio', stdioPath: undefined, authToken: '', allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
+      readConfig: () => ({ modelBridge: { enabled: true, stdioPath: undefined, allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
     };
 
     function makeRequire() {

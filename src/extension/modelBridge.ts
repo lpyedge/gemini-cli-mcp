@@ -1,17 +1,15 @@
 import * as vscode from 'vscode';
-import http, { IncomingMessage, ServerResponse } from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { readConfig } from './configUtils';
 import { ModelBridgeConfig } from './types';
 import { getMcpClient, callTool } from './mcpClient';
 import { runOrchestrator } from './orchestrator';
 
-const STDIO_DEFAULT_PATH = os.platform() === 'win32'
-  ? String.raw`\\.\pipe\gemini-mcp-bridge`
-  : path.join(os.tmpdir(), 'gemini-mcp-bridge.sock');
 
 interface BridgeResponder {
   respond(status: number, body: unknown): void;
@@ -28,31 +26,170 @@ function safeJson(value: unknown) {
   }
 }
 
-function parseRequestBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const buffers: Buffer[] = [];
-    req.on('data', (chunk) => buffers.push(Buffer.from(chunk)));
-    req.on('end', () => resolve(Buffer.concat(buffers).toString('utf8')));
-    req.on('error', reject);
+function sha1(input: string) {
+  return crypto.createHash('sha1').update(input).digest('hex');
+}
+
+function normalizeWorkspaceRoot(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function defaultSocketPath(stdioPath?: string) {
+  if (stdioPath && stdioPath.trim().length > 0) return stdioPath;
+  const workspaceRoot = normalizeWorkspaceRoot();
+  const fp = workspaceRoot ? sha1(workspaceRoot).slice(0, 8) : sha1(process.cwd()).slice(0, 8);
+  if (process.platform === 'win32') {
+    return `\\.\\pipe\\gemini-mcp-${fp}`;
+  }
+  if (workspaceRoot) {
+    return path.join(workspaceRoot, '.vscode', 'gemini-mcp', `bridge-${fp}.sock`);
+  }
+  return path.join(os.tmpdir(), `gemini-mcp-${fp}.sock`);
+}
+
+async function tryConnectOnce(socketPath: string, timeout = 200) {
+  return new Promise<void>((resolve, reject) => {
+    const s = net.connect(socketPath, () => {
+      s.destroy();
+      resolve();
+    });
+    const timer = setTimeout(() => {
+      s.destroy();
+      reject(new Error('connect timeout'));
+    }, timeout);
+    s.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
-function respondJson(res: ServerResponse, status: number, body: unknown) {
-  res.statusCode = status;
-  res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify(body));
+export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, onConnection?: (socket: import('node:net').Socket, cfg?: any) => void) {
+  const chosen = defaultSocketPath(cfg?.stdioPath);
+  let socketPath = chosen;
+  if (process.platform !== 'win32') {
+    const dir = path.dirname(socketPath);
+    try {
+      await fsPromises.mkdir(dir, { recursive: true });
+    } catch {}
+  }
+
+  if (process.platform !== 'win32' && fs.existsSync(socketPath)) {
+    try {
+      await tryConnectOnce(socketPath, 200);
+      output?.appendLine(`ModelBridge stdio: existing active socket at ${socketPath}`);
+      return { server: null as any, path: socketPath, active: true };
+    } catch (e) {
+      try { fs.unlinkSync(socketPath); } catch (err) {
+        output?.appendLine(`ModelBridge stdio: failed to remove stale socket ${socketPath}: ${String(err)}`);
+      }
+    }
+  }
+
+  const server = net.createServer((socket) => {
+    if (typeof onConnection === 'function') {
+      try {
+        onConnection(socket, cfg);
+        return;
+      } catch (e) {
+        output?.appendLine(`ModelBridge stdio: onConnection handler threw: ${String(e)}`);
+      }
+    }
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const raw = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!raw) continue;
+        try {
+          const payload = JSON.parse(raw);
+          output?.appendLine(`[stdio bridge request] ${JSON.stringify(payload).slice(0,2000)}`);
+        } catch (err) {
+          output?.appendLine(`[stdio bridge] json parse error: ${String(err)}`);
+        }
+      }
+    });
+    socket.on('error', (err) => output?.appendLine(`ModelBridge stdio client socket error: ${String(err)}`));
+  });
+
+  let attempts = 0;
+  const maxAttempts = 3;
+  while (true) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, () => {
+          server.removeAllListeners('error');
+          resolve();
+        });
+      });
+      break;
+    } catch (err: any) {
+      attempts += 1;
+      const msg = String(err && err.message);
+      if (msg && msg.toLowerCase().includes('eaddrinuse') && attempts < maxAttempts) {
+        try {
+          await tryConnectOnce(socketPath, 200);
+          output?.appendLine(`ModelBridge stdio: socket ${socketPath} in use by active server`);
+          return { server: null as any, path: socketPath, active: true };
+        } catch {
+          try { fs.unlinkSync(socketPath); } catch {}
+          socketPath = socketPath + `.${process.pid}`;
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(socketPath, 0o600); } catch (err) { output?.appendLine(`ModelBridge stdio: chmod failed for ${socketPath}: ${String(err)}`); }
+  }
+
+  try {
+    const workspaceRoot = normalizeWorkspaceRoot();
+    if (workspaceRoot) {
+      const statusFile = path.join(workspaceRoot, '.vscode', 'gemini-mcp', 'status.json');
+      try {
+        const existing = await fsPromises.readFile(statusFile, 'utf8').catch(() => undefined);
+        let parsed: any = existing ? JSON.parse(existing) : {};
+        parsed.stdioPath = socketPath;
+        parsed.stdioPid = process.pid;
+        parsed.stdioUpdated = Date.now();
+        await fsPromises.mkdir(path.dirname(statusFile), { recursive: true }).catch(() => {});
+        await fsPromises.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
+        output?.appendLine(`ModelBridge stdio: persisted socket path ${socketPath} to ${statusFile}`);
+      } catch (err) {
+        output?.appendLine(`ModelBridge stdio: failed to persist socket path: ${String(err)}`);
+      }
+    }
+  } catch {}
+
+  server.on('close', () => {
+    if (process.platform !== 'win32') {
+      try { fs.unlinkSync(socketPath); } catch {}
+    }
+    output?.appendLine(`ModelBridge stdio: server closed and cleaned ${socketPath}`);
+  });
+
+  output?.appendLine(`ModelBridge stdio: listening on ${socketPath}`);
+  return { server, path: socketPath, active: false };
 }
 
-function respondNotFound(res: ServerResponse) {
-  respondJson(res, 404, { error: 'not_found' });
+export async function stopStdioBridge(server: net.Server | null, socketPath?: string, output?: vscode.OutputChannel) {
+  if (!server) return;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (socketPath && process.platform !== 'win32') {
+    try { fs.unlinkSync(socketPath); } catch {}
+  }
+  output?.appendLine(`ModelBridge stdio: stopped`);
 }
 
-function respondUnauthorized(res: ServerResponse) {
-  respondJson(res, 401, { error: 'unauthorized' });
-}
 
 export class ModelBridge implements vscode.Disposable {
-  private httpServer?: http.Server;
   private stdioServer?: net.Server;
   private stdioListener?: string;
   private activeCalls: Map<string, { tool: string; startedAt: number; timedOut?: boolean; controller?: AbortController; sdkMessageId?: number | string }> = new Map();
@@ -70,36 +207,25 @@ export class ModelBridge implements vscode.Disposable {
       return;
     }
 
-    const tasks: Promise<void>[] = [];
-    if (cfg.mode === 'stdio' || cfg.mode === 'both') {
-      tasks.push(this.startStdio(cfg));
+    try {
+      const res = await startStdioBridge(cfg, this.output, (socket) => this.handleStdioConnection(socket, cfg));
+      if (res && res.server) {
+        this.stdioServer = res.server;
+        this.stdioListener = res.path;
+        this.output.appendLine(`ModelBridge: stdio bridge listening on ${res.path}`);
+      } else if (res && res.active) {
+        this.output.appendLine(`ModelBridge: stdio bridge detected active listener at ${res.path}`);
+      }
+    } catch (error) {
+      this.output.appendLine(`ModelBridge: failed to start stdio bridge: ${String(error)}`);
     }
-    if (cfg.mode === 'http' || cfg.mode === 'both') {
-      tasks.push(this.startHttp(cfg));
-    }
-
-    await Promise.all(tasks.map((p) =>
-      p.catch((error) => this.output.appendLine(`ModelBridge: failed to start ${cfg.mode} bridge: ${String(error)}`))
-    ));
   }
 
   async stop() {
-    if (this.httpServer) {
-      await new Promise<void>((resolve) => this.httpServer?.close(() => resolve()));
-      this.output.appendLine('ModelBridge: HTTP bridge stopped.');
-      this.httpServer = undefined;
-    }
+    // stop stdio server
     if (this.stdioServer) {
-      await new Promise<void>((resolve) => this.stdioServer?.close(() => resolve()));
-      this.output.appendLine('ModelBridge: stdio bridge stopped.');
+      await stopStdioBridge(this.stdioServer, this.stdioListener, this.output).catch(() => {});
       this.stdioServer = undefined;
-    }
-    if (this.stdioListener && os.platform() !== 'win32') {
-      try {
-        fs.unlinkSync(this.stdioListener);
-      } catch {
-        // ignore
-      }
       this.stdioListener = undefined;
     }
   }
@@ -117,87 +243,7 @@ export class ModelBridge implements vscode.Disposable {
     return cfg.modelBridge;
   }
 
-  private async startHttp(cfg: ModelBridgeConfig) {
-    const host = '127.0.0.1';
-    this.httpServer = http.createServer((req, res) => this.handleHttpRequest(req, res, cfg));
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => reject(err);
-      this.httpServer?.once('error', onError);
-      this.httpServer?.listen(cfg.httpPort, host, () => {
-        this.httpServer?.off('error', onError);
-        this.output.appendLine(`ModelBridge: HTTP bridge listening on http://${host}:${cfg.httpPort}`);
-        resolve();
-      });
-    });
-  }
-
-  private async startStdio(cfg: ModelBridgeConfig) {
-    const listener = cfg.stdioPath || STDIO_DEFAULT_PATH;
-    if (os.platform() !== 'win32') {
-      try {
-        if (fs.existsSync(listener)) {
-          fs.unlinkSync(listener);
-        }
-      } catch (error) {
-        this.output.appendLine(`ModelBridge: failed to clear socket ${listener}: ${String(error)}`);
-      }
-    }
-    this.stdioServer = net.createServer((socket) => this.handleStdioConnection(socket, cfg));
-    this.stdioListener = listener;
-    await new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => reject(err);
-      this.stdioServer?.once('error', onError);
-      this.stdioServer?.listen(listener, () => {
-        this.stdioServer?.off('error', onError);
-        this.output.appendLine(`ModelBridge: stdio bridge listening on ${listener}`);
-        resolve();
-      });
-    });
-  }
-
-  private async handleHttpRequest(req: IncomingMessage, res: ServerResponse, cfg: ModelBridgeConfig) {
-    if (!cfg.enabled) {
-      respondJson(res, 503, { error: 'bridge_disabled' });
-      return;
-    }
-    if (!this.verifyHttpToken(req, cfg)) {
-      respondUnauthorized(res);
-      return;
-    }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    if (req.method === 'GET' && url.pathname === '/health') {
-      respondJson(res, 200, { ok: true });
-      return;
-    }
-    if (req.method !== 'POST') {
-      respondNotFound(res);
-      return;
-    }
-    const body = await parseRequestBody(req);
-    let payload: any = {};
-    if (body && body.trim().length) {
-      try {
-        payload = JSON.parse(body);
-      } catch (error) {
-        respondJson(res, 400, { error: 'invalid_json', message: String(error) });
-        return;
-      }
-    }
-    switch (url.pathname) {
-      case '/call-tool':
-        await this.executeToolRequest(payload, cfg, {
-          respond: (status, body) => respondJson(res, status, body)
-        });
-        break;
-      case '/orchestrate':
-        await this.runOrchestrator(cfg, {
-          respond: (status, body) => respondJson(res, status, body)
-        });
-        break;
-      default:
-        respondNotFound(res);
-    }
-  }
+  
 
   private handleStdioConnection(socket: net.Socket, cfg: ModelBridgeConfig) {
     let buffer = '';
@@ -219,10 +265,7 @@ export class ModelBridge implements vscode.Disposable {
           continue;
         }
         const responder = this.createStdioResponder(socket, payload.id ?? payload.requestId);
-        if (!this.verifyStdioToken(payload, cfg)) {
-          responder.respond(401, { error: 'unauthorized' });
-          continue;
-        }
+        // no token/auth checks in local stdio mode
         const type = payload.type ?? (payload.toolName ? 'callTool' : 'health');
         void this.dispatchStdioCommand(type, payload, cfg, responder);
       }
@@ -367,21 +410,5 @@ export class ModelBridge implements vscode.Disposable {
 `);
   }
 
-  private verifyHttpToken(req: IncomingMessage, cfg: ModelBridgeConfig) {
-    if (!cfg.authToken || cfg.authToken.trim().length === 0) {
-      return true;
-    }
-    const header = (req.headers['x-gemini-mcp-token'] ?? req.headers['authorization'] ?? '') as string;
-    const normalized = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim();
-    return normalized === cfg.authToken.trim();
-  }
-
-  private verifyStdioToken(payload: any, cfg: ModelBridgeConfig) {
-    if (!cfg.authToken || cfg.authToken.trim().length === 0) {
-      return true;
-    }
-    const provided = (payload.token ?? payload.authToken ?? payload.authorization ?? '') as string;
-    const normalized = provided.startsWith('Bearer ') ? provided.slice(7).trim() : provided.trim();
-    return normalized === cfg.authToken.trim();
-  }
+  // token/auth removed for local stdio mode
 }

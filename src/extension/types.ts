@@ -2,7 +2,10 @@ import * as vscode from 'vscode';
 
 // Shared types used by the extension modules
 
-export type ModelBridgeMode = 'stdio' | 'http' | 'both';
+// ModelBridge used to support multiple transport modes. The extension
+// currently only supports a local stdio/socket bridge, so the explicit
+// `ModelBridgeMode` type and `mode` setting were removed in favor of
+// a single stdio default.
 
 export interface GeminiConfig {
     geminiPath: string;
@@ -31,10 +34,7 @@ export interface PriorityConfig {
 
 export interface ModelBridgeConfig {
     enabled: boolean;
-    mode: ModelBridgeMode;
-    httpPort: number;
     stdioPath: string;
-    authToken?: string;
     allowedTools: string[];
     allowOrchestrator: boolean;
     requestTimeoutMs?: number;

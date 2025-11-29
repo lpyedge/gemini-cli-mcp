@@ -73,7 +73,7 @@ test('ModelBridge captures sdkMessageId when SDK emits messageSent (sdkHook mode
 
   const captureMode = process.env.GEMINI_CAPTURE_MODE || 'sdkHook';
   const fakeConfigModule = {
-    readConfig: () => ({ modelBridge: { enabled: true, mode: 'stdio', stdioPath: undefined, authToken: '', allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
+    readConfig: () => ({ modelBridge: { enabled: true, stdioPath: undefined, allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
   };
 
   function makeRequire() {
@@ -148,7 +148,7 @@ test('ModelBridge does not capture numeric sdkMessageId when capture mode is dis
   };
 
   const fakeConfigModule = {
-    readConfig: () => ({ modelBridge: { enabled: true, mode: 'stdio', stdioPath: undefined, authToken: '', allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: 'disabled' }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
+    readConfig: () => ({ modelBridge: { enabled: true, stdioPath: undefined, allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: 'disabled' }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
   };
 
   function makeRequire() {

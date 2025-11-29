@@ -80,6 +80,28 @@ const defaultPriorities: Record<string, number> = {
 const tasks = new Map<string, TaskRecord>();
 const taskEvents = new EventEmitter();
 const pool = new WorkerPool(workerCount);
+// Try to reuse a persisted gemini CLI path if the extension previously stored it
+try {
+    const persisted = fsSync.readFileSync(statusFile, 'utf8');
+    if (persisted) {
+        try {
+            const parsed = JSON.parse(persisted);
+            const persistedGemini = parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath);
+            if (persistedGemini && String(persistedGemini).trim().length > 0) {
+                try {
+                    setGeminiBin(String(persistedGemini));
+                    console.log(`[server] Using persisted gemini path from status.json: ${String(persistedGemini)}`);
+                } catch (e) {
+                    console.warn('[server] Failed to apply persisted gemini path:', e);
+                }
+            }
+        } catch {
+            // ignore malformed status file
+        }
+    }
+} catch {
+    // statusFile may not exist yet; ignore
+}
 
 const persistence = createPersistenceManager({
     tasks,
@@ -1308,6 +1330,15 @@ function stopCliHealthWatcher() {
 async function start() {
     await validateGeminiExecutable();
     await updateCliStatus('startup');
+    // If we have a discovered absolute gemini binary and the workspace
+    // status.json does not already contain a persisted path, write it
+    // so subsequent extension/server launches can reuse the absolute path
+    // instead of relying on PATH discovery.
+    try {
+        await persistDiscoveredGeminiPathIfMissing();
+    } catch (err) {
+        console.warn('Failed to persist discovered gemini path:', err);
+    }
     await persistence.loadPersistedTasks();
     // Load and register tool metadata from mcp.json (manifest)
     await loadMcpManifest();
@@ -1316,6 +1347,44 @@ async function start() {
     startCliHealthWatcher();
     const transport = new StdioServerTransport();
     await server.connect(transport);
+}
+
+async function persistDiscoveredGeminiPathIfMissing() {
+    try {
+        // Only persist when geminiBin looks like an explicit path (contains path separator)
+        if (!geminiBin || !geminiBin.includes(path.sep)) {
+            return;
+        }
+        // Ensure state directory exists
+        await fs.mkdir(stateDir, { recursive: true });
+        // Read existing status file if present
+        let raw: string | undefined;
+        try {
+            raw = await fs.readFile(statusFile, 'utf8');
+        } catch {
+            raw = undefined;
+        }
+        let parsed: any = {};
+        if (raw) {
+            try {
+                parsed = JSON.parse(raw) as any;
+            } catch {
+                parsed = {};
+            }
+        }
+        const existing = parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath);
+        if (existing && String(existing).trim().length > 0) {
+            // already persisted
+            return;
+        }
+        parsed.geminiPath = String(geminiBin);
+        parsed.updatedAt = Date.now();
+        await fs.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
+        console.log(`[server] Persisted discovered gemini path to ${statusFile}: ${String(geminiBin)}`);
+    } catch (err) {
+        // best-effort; do not fail startup
+        console.warn('persistDiscoveredGeminiPathIfMissing failed:', err);
+    }
 }
 
 async function loadMcpManifest() {
@@ -1336,41 +1405,51 @@ async function loadMcpManifest() {
         const manifestDir = path.dirname(manifestPath);
         const externalCache: Record<string, any> = {};
         for (const t of manifest.tools || []) {
-            try {
-                // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
-                const hasTool = (server as any).hasTool?.(t.name) ?? Boolean((server as any)._tools && (server as any)._tools[t.name]);
-                if (hasTool) {
-                    // already registered by code; skip
-                    continue;
-                }
-                // Register a lightweight metadata-only handler for tools not implemented server-side yet.
-                // Convert the manifest's JSON Schema to a zod schema when possible,
-                // so clients/models receive a stricter inputSchema.
-                let resolvedArgs: any = undefined;
                 try {
-                    if (t.arguments) {
-                        resolvedArgs = await dereferenceSchema(t.arguments, manifest, manifestDir, externalCache);
+                    // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
+                    const hasTool = (server as any).hasTool?.(t.name) ?? Boolean((server as any)._tools && (server as any)._tools[t.name]);
+                    if (hasTool) {
+                        // already registered by code; skip
+                        continue;
                     }
-                } catch (refErr) {
-                    console.warn(`Failed to dereference schema for tool ${t.name}:`, refErr);
-                    resolvedArgs = t.arguments;
+                    // Register a lightweight metadata-only handler for tools not implemented server-side yet.
+                    // Convert the manifest's JSON Schema to a zod schema when possible,
+                    // so clients/models receive a stricter inputSchema.
+                    let resolvedArgs: any = undefined;
+                    try {
+                        if (t.arguments) {
+                            resolvedArgs = await dereferenceSchema(t.arguments, manifest, manifestDir, externalCache);
+                        }
+                    } catch (refErr) {
+                        console.warn(`Failed to dereference schema for tool ${t.name}:`, refErr);
+                        resolvedArgs = t.arguments;
+                    }
+                    const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
+                    try {
+                        server.registerTool(
+                            t.name,
+                            {
+                                title: t.title ?? t.name,
+                                description: t.description ?? '',
+                                inputSchema: inputSchemaZod
+                            },
+                            async (_input, _extra) => {
+                                return textResponse({ error: 'Tool advertised in mcp.json but no server-side handler is implemented.' });
+                            }
+                        );
+                        console.log(`Advertised tool: ${t.name}`);
+                    } catch (regErr: any) {
+                        const msg = String((regErr && regErr.message) || regErr);
+                        if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
+                            // duplicate registration -- reduce noise and continue
+                            console.log(`Skipping advertisement for already-registered tool ${t.name}`);
+                        } else {
+                            console.warn(`Failed to advertise tool ${t.name}:`, regErr);
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`Failed to advertise tool ${t.name}:`, err);
                 }
-                const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
-                server.registerTool(
-                    t.name,
-                    {
-                        title: t.title ?? t.name,
-                        description: t.description ?? '',
-                        inputSchema: inputSchemaZod
-                    },
-                    async (_input, _extra) => {
-                        return textResponse({ error: 'Tool advertised in mcp.json but no server-side handler is implemented.' });
-                    }
-                );
-                console.log(`Advertised tool: ${t.name}`);
-            } catch (err) {
-                console.warn(`Failed to advertise tool ${t.name}:`, err);
-            }
         }
     } catch (err) {
         console.error('Failed to load mcp.json manifest:', err);

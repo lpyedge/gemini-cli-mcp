@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import path from 'node:path';
-declare const require: any;
-const Client: any = require('@modelcontextprotocol/sdk/client').Client;
-const StdioClientTransport: any = require('@modelcontextprotocol/sdk/client/stdio.js').StdioClientTransport;
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+
+import { resolveTaskCwd } from './configUtils';
 
 let cached: { client: any; transport: any } | undefined;
 
@@ -24,14 +24,52 @@ function sanitizeEnv(rawEnv: NodeJS.ProcessEnv) {
 
 export async function getMcpClient(cfg: any, output?: vscode.OutputChannel) {
   if (cached) return cached;
-  const workspaceRoot = cfg.taskCwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+  // Dynamically import the SDK at runtime so tests and ESM loaders do not
+  // encounter synchronous CJS require() cycles. The SDK is published as
+  // dual-mode; dynamic import keeps runtime loading strategy flexible.
+  // The SDK ships both CJS and ESM entrypoints; at runtime we prefer dynamic
+  // import so the loader chooses the correct format. TypeScript's module
+  // resolution in this repo may not resolve the SDK's ESM typing under the
+  // current settings, so ignore the typecheck for this dynamic import.
+  // @ts-ignore - dynamic import resolved at runtime
+  const sdkClientMod: any = await import('@modelcontextprotocol/sdk/client');
+  const Client: any = (sdkClientMod as any).Client || (sdkClientMod as any).default;
+  // Stdio transport may be exported from a separate entrypoint; attempt to
+  // import it explicitly (fallback to the named export on the client module).
+  let StdioClientTransport: any = (sdkClientMod as any).StdioClientTransport;
+  if (!StdioClientTransport) {
+    try {
+      const stdioMod = await import('@modelcontextprotocol/sdk/client/stdio.js');
+      StdioClientTransport = (stdioMod as any).StdioClientTransport || (stdioMod as any).default;
+    } catch {
+      // ignore; if missing we'll rely on SDK client exports above
+    }
+  }
+  // Resolve configured taskCwd (supports ${workspaceFolder}, relative paths, absolute)
+  const workspaceRoot = resolveTaskCwd(cfg?.taskCwd) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
   const extensionPath = vscode.extensions.getExtension('lpyedge.gemini-cli-mcp')?.extensionPath || process.cwd();
   const serverEntry = path.join(extensionPath, 'server', 'dist', 'index.js');
   if (output) output.appendLine(`mcpClient: serverEntry=${serverEntry}`);
+  // Prefer persisted geminiPath in workspace .vscode/gemini-mcp/status.json when present
+  let persistedGemini: string | undefined = undefined;
+  try {
+    const statusPath = path.join(workspaceRoot, '.vscode', 'gemini-mcp', 'status.json');
+    const raw = await fs.readFile(statusPath, 'utf8').catch(() => undefined);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as any;
+        persistedGemini = (parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath)) ? String(parsed.geminiPath || parsed.gemini || parsed.cliPath) : undefined;
+      } catch {
+        persistedGemini = undefined;
+      }
+    }
+  } catch {
+    persistedGemini = undefined;
+  }
 
   const rawEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    GEMINI_CLI: cfg.geminiPath,
+    GEMINI_CLI: (persistedGemini && persistedGemini.trim().length > 0) ? persistedGemini : cfg.geminiPath,
     GEMINI_MAX_WORKERS: String(Math.max(1, cfg.maxWorkers ?? 2)),
     GEMINI_TASK_CWD: workspaceRoot,
     GEMINI_MAX_QUEUE: String(Math.max(1, cfg.maxQueue ?? 200))

@@ -47,7 +47,7 @@ test('ModelBridge should log bridge req id and sdk message id when call-tool inv
 
   const captureMode = process.env.GEMINI_CAPTURE_MODE || 'bestEffort';
   const fakeConfigModule = {
-    readConfig: () => ({ modelBridge: { enabled: true, mode: 'stdio', stdioPath: undefined, authToken: '', allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
+    readConfig: () => ({ modelBridge: { enabled: true, stdioPath: undefined, allowedTools: [], allowOrchestrator: false, requestTimeoutMs: 60000, captureSdkMessageId: captureMode }, geminiPath: 'node', maxWorkers: 1, maxQueue: 10 })
   };
 
   // custom require that resolves local stubs for relative imports used by transpiled code

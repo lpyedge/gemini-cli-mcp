@@ -64,7 +64,7 @@ test('mcp manifest with internal $defs and external relative $ref is loaded and 
     // spawn the compiled server (server/dist/index.js)
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
-    const serverDist = path.resolve(path.join(__dirname, '..', 'dist', 'index.js'));
+    const serverDist = path.resolve(path.join(__dirname, '..', '..', 'server', 'dist', 'index.js'));
     assert.ok(fsSync.existsSync(serverDist), `Expected compiled server at ${serverDist}`);
 
     const env = { ...process.env, GEMINI_TASK_CWD: tmp };
