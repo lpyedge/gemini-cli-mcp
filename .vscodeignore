@@ -4,8 +4,21 @@ node_modules/**
 scripts/**
 src/**
 server/src/**
+test/**
+tests/**
+test-temp/**
+.github/**
+README.md
+CHANGELOG.md
+mcp.sample.json
+LICENSE
 tsconfig.json
 server/tsconfig.json
 package-lock.json
 dist/*.vsix
-test-temp/**
+# 保留必要的 dist、package.json、mcp.json
+!dist/**
+!server/dist/**
+!package.json
+!mcp.json
+!server/package.json

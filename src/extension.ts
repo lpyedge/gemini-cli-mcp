@@ -230,16 +230,16 @@ export function activate(context: vscode.ExtensionContext) {
 	} else {
 		output.appendLine('Gemini MCP: host does not support MCP server provider registration API; installing no-op shim for compatibility.');
 		try {
-			const existing = (vscode as any).lm ?? (vscode as any).mcp ?? undefined;
+			const existing = (globalThis as any).__geminiLmShim ?? (vscode as any).mcp ?? undefined;
 			if (!existing || !existing.registerMcpServerDefinitionProvider) {
-				(vscode as any).lm = {
+				(globalThis as any).__geminiLmShim = {
 					registerMcpServerDefinitionProvider: (id: string, provider: any) => {
 						output.appendLine(`Gemini MCP: registered no-op MCP provider (shim) for ${id}`);
 						return { dispose: () => output.appendLine(`Gemini MCP: disposed no-op MCP provider (shim) for ${id}`) };
 					}
 				};
 				// Ensure we clean up shim on deactivate
-				context.subscriptions.push({ dispose: () => { try { delete (vscode as any).lm; } catch {} } });
+				context.subscriptions.push({ dispose: () => { try { delete (globalThis as any).__geminiLmShim; } catch {} } });
 			}
 		} catch (e) {
 			output.appendLine(`Gemini MCP: failed to install no-op shim: ${String(e)}`);

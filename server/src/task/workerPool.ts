@@ -16,6 +16,7 @@ export class WorkerPool {
     private nextId = 0;
     private active = new Map<number, JobEntry>();
     private readonly emitter = new EventEmitter();
+    private lock = false; // 防止競態
 
     constructor(concurrency: number) {
         this.concurrency = Math.max(1, concurrency);
@@ -28,36 +29,58 @@ export class WorkerPool {
         this.emitter.on(event as any, cb);
     }
 
-    enqueue(handler: JobHandler, priority = 0): number {
-        const entry: JobEntry = {
+    enqueue(handler: JobHandler, priority = 0) {
+        return this.enqueueWithDelay(handler, priority, 0, undefined);
+    }
+
+    enqueueWithDelay(handler: JobHandler, priority = 0, delayMs = 0, scheduleAt?: number) {
+        const entry = {
             id: ++this.nextId,
             handler,
             controller: new AbortController(),
             priority
         };
-        this.queue.push(entry);
-        this.queue.sort((a, b) => {
-            if (b.priority === a.priority) {
-                return a.id - b.id;
-            }
-            return b.priority - a.priority;
-        });
-        this.emitter.emit('queue');
-        this.pump();
+        const enqueueAction = () => {
+            this.queue.push(entry);
+            this.queue.sort((a, b) => {
+                if (b.priority === a.priority) {
+                    return a.id - b.id;
+                }
+                return b.priority - a.priority;
+            });
+            this.emitter.emit('queue');
+            this.pump();
+        };
+        if (scheduleAt && scheduleAt > Date.now()) {
+            setTimeout(enqueueAction, scheduleAt - Date.now());
+        } else if (delayMs > 0) {
+            setTimeout(enqueueAction, delayMs);
+        } else {
+            enqueueAction();
+        }
         return entry.id;
     }
 
     cancel(jobId: number) {
+        let found = false;
         for (const entry of this.queue) {
             if (entry.id === jobId) {
                 entry.controller.abort();
                 this.queue = this.queue.filter(item => item.id !== jobId);
                 this.emitter.emit('queue');
-                return;
+                found = true;
+                break;
             }
         }
-        const running = this.active.get(jobId);
-        running?.controller.abort();
+        if (!found) {
+            const running = this.active.get(jobId);
+            if (running) {
+                running.controller.abort();
+                found = true;
+            }
+        }
+        this.emitter.emit('changed');
+        return found ? true : false;
     }
 
     cancelAll() {
@@ -82,30 +105,45 @@ export class WorkerPool {
     }
 
     private pump() {
-        while (this.running < this.concurrency && this.queue.length > 0) {
-            const entry = this.queue.shift();
-            if (!entry) {
-                continue;
+        if (this.lock) return;
+        this.lock = true;
+        try {
+            while (this.running < this.concurrency && this.queue.length > 0) {
+                const entry = this.queue.shift();
+                if (!entry) {
+                    continue;
+                }
+                // Skip entries that were aborted while still in the queue so我們不會啟動
+                if (entry.controller.signal.aborted) {
+                    continue;
+                }
+                this.running += 1;
+                this.emitter.emit('changed');
+                this.active.set(entry.id, entry);
+                entry.handler(entry.controller.signal)
+                    .catch((error) => {
+                        console.error(`WorkerPool job ${entry.id} failed`, error);
+                    })
+                    .finally(() => {
+                        this.active.delete(entry.id);
+                        this.running -= 1;
+                        this.emitter.emit('changed');
+                        this.pump();
+                    });
             }
-            // Skip entries that were aborted while still in the queue so we don't
-            // count them as running or start their handler.
-            if (entry.controller.signal.aborted) {
-                // ensure it's not left referenced anywhere and continue pumping
-                continue;
-            }
-            this.running += 1;
-            this.emitter.emit('changed');
-            this.active.set(entry.id, entry);
-            entry.handler(entry.controller.signal)
-                .catch((error) => {
-                    console.error(`WorkerPool job ${entry.id} failed`, error);
-                })
-                .finally(() => {
-                    this.active.delete(entry.id);
-                    this.running -= 1;
-                    this.emitter.emit('changed');
-                    this.pump();
-                });
+        } finally {
+            this.lock = false;
         }
+    }
+
+    /**
+     * 重試指定 jobId（僅限已取消/失敗/完成的任務）
+     */
+    retry(jobId: number): number | undefined {
+        const old = this.active.get(jobId) || this.queue.find(e => e.id === jobId);
+        if (!old) return undefined;
+        // 只允許重試已完成/失敗/取消的任務
+        if (!old.controller.signal.aborted) return undefined;
+        return this.enqueueWithDelay(old.handler, old.priority);
     }
 }

@@ -170,6 +170,15 @@ export class GeminiCliHealth implements vscode.Disposable {
             });
             let stdout = '';
             let stderr = '';
+            let finished = false;
+            const timeoutMs = 15000;
+            const timer = setTimeout(() => {
+                if (!finished) {
+                    finished = true;
+                    try { child.kill('SIGKILL'); } catch {}
+                    reject(new Error('Gemini CLI health check timed out (10s)'));
+                }
+            }, timeoutMs);
             child.stdout?.on('data', (chunk) => {
                 stdout += chunk.toString();
             });
@@ -177,14 +186,22 @@ export class GeminiCliHealth implements vscode.Disposable {
                 stderr += chunk.toString();
             });
             child.on('error', (error) => {
-                reject(error);
+                if (!finished) {
+                    finished = true;
+                    clearTimeout(timer);
+                    reject(error);
+                }
             });
             child.on('close', (code) => {
-                if (code === 0) {
-                    resolve((stdout || stderr).trim());
-                } else {
-                    const text = (stderr || stdout || `Gemini CLI exited with code ${code}`).trim();
-                    reject(new Error(text));
+                if (!finished) {
+                    finished = true;
+                    clearTimeout(timer);
+                    if (code === 0) {
+                        resolve((stdout || stderr).trim());
+                    } else {
+                        const text = (stderr || stdout || `Gemini CLI exited with code ${code}`).trim();
+                        reject(new Error(text));
+                    }
                 }
             });
         });

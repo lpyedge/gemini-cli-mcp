@@ -34,7 +34,10 @@ export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
       tasks.push({ label: s.label, error: s.error });
       continue;
     }
-    const first = s.res.content?.find((c: any) => c.type === 'text');
+        let first: any = undefined;
+        if (Array.isArray(s.res?.result?.content)) {
+          first = s.res.result.content.find((c: any) => c.type === 'text');
+        }
     if (!first || !first.text) {
       tasks.push({ label: s.label, immediate: s.res });
       continue;
