@@ -79,8 +79,20 @@ async function buildMcpDefinitions(
 		}
 	}
 
-	// Use the extension host's Node executable to avoid PATH-related failures
-	const nodeBin = process.execPath || 'node';
+	// Use the extension host's Node executable when it is actually Node;
+	// when running in the packaged VS Code build `process.execPath` is
+	// often the Code executable (Code.exe) which will not run a plain JS
+	// file. Prefer `node` in that case so the server is started by Node
+	// available on PATH instead of attempting to execute Code.exe.
+	let nodeBin = process.execPath || 'node';
+	try {
+		const execName = path.basename(String(nodeBin)).toLowerCase();
+		if (!execName.includes('node')) {
+			nodeBin = 'node';
+		}
+	} catch {
+		nodeBin = 'node';
+	}
 	const args = [serverEntry];
 	output.appendLine(`Gemini MCP: starting node executable=${nodeBin} args=${JSON.stringify(args)}`);
 

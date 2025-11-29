@@ -54,7 +54,8 @@ function findGeminiInCommonPaths() {
 
 function findGeminiViaWhere() {
     try {
-        const result = spawnSync('where', ['gemini'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        // Use explicit where.exe to avoid PowerShell alias (where is an alias in PS)
+        const result = spawnSync('where.exe', ['gemini'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
         if (result.status !== 0) {
             return undefined;
         }
