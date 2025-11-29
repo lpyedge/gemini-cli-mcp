@@ -8,6 +8,9 @@ import { readConfig, resolveTaskCwd, clampPriority } from './extension/configUti
 import { GeminiCliHealth } from './extension/cliHealth';
 import { GeminiTaskTreeProvider } from './extension/treeProvider';
 import { TaskStatusMonitor } from './extension/statusMonitor';
+import { runOrchestrator } from './extension/orchestrator';
+import * as mcpClientModule from './extension/mcpClient';
+import { ModelBridge } from './extension/modelBridge';
 
 // The activate module wires the UI pieces together and registers the MCP provider
 // and extension commands. It intentionally keeps the wiring logic concise and
@@ -175,6 +178,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusMonitor = new TaskStatusMonitor(context, statusItem, taskTreeProvider, cliHealth);
 	context.subscriptions.push(statusMonitor);
 
+	const modelBridge = new ModelBridge(output);
+	context.subscriptions.push(modelBridge);
+	void modelBridge.start();
+
 	const initialConfig = readConfig();
 	const initialHealthCheck = cliHealth.refresh(initialConfig);
 
@@ -187,13 +194,18 @@ export function activate(context: vscode.ExtensionContext) {
 		providerTriggerCount += 1;
 		output.appendLine(`Gemini MCP: providerEmitter fired (${providerTriggerCount} times)`);
 	});
-	context.subscriptions.push(cliHealth.onDidChange(() => providerEmitter.fire()));
+	// NOTE: do not fire providerEmitter directly from cliHealth.onDidChange.
+	// Firing the provider on every health change causes a feedback loop:
+	// cliHealth.onDidChange -> providerEmitter.fire -> provideMcpServerDefinitions -> cliHealth.refresh
+	// which leads to repeated refreshes and toggling of the health state.
+	// The `TaskStatusMonitor` already receives `cliHealth` and will update UI; keep health-change
+	// handling scoped to UI/diagnostics only.
 	const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(() => {
 		providerEmitter.fire();
 	});
 	context.subscriptions.push(workspaceWatcher);
 
-	const provider = vscode.lm.registerMcpServerDefinitionProvider('gemini-mcp-provider', {
+	const providerObj = {
 		onDidChangeMcpServerDefinitions: providerEmitter.event,
 		provideMcpServerDefinitions: async () => {
 			output.appendLine(`Gemini MCP: provideMcpServerDefinitions called (#${providerTriggerCount + 1})`);
@@ -201,12 +213,42 @@ export function activate(context: vscode.ExtensionContext) {
 			const cfg = readConfig();
 			return buildMcpDefinitions(context, cfg, cliHealth, output, initialHealthCheck, providerTriggerCount);
 		},
-		resolveMcpServerDefinition: async (server) => server
-	});
-	context.subscriptions.push(provider);
+		resolveMcpServerDefinition: async (server: any) => server
+	};
+
+	// MCP host API can live under different namespaces depending on VS Code
+	// version or proposed APIs. Feature-detect the provider registration API
+	// rather than assuming `vscode.lm` exists to reduce strict engine bounds.
+	const hostLm: any = (vscode as any).lm ?? (vscode as any).mcp ?? (vscode as any);
+	if (hostLm && typeof hostLm.registerMcpServerDefinitionProvider === 'function') {
+		const provider = hostLm.registerMcpServerDefinitionProvider('gemini-mcp-provider', providerObj);
+		context.subscriptions.push(provider);
+	} else if (typeof (vscode as any).registerMcpServerDefinitionProvider === 'function') {
+		// some hosts might expose a top-level registration function
+		const provider = (vscode as any).registerMcpServerDefinitionProvider('gemini-mcp-provider', providerObj);
+		context.subscriptions.push(provider);
+	} else {
+		output.appendLine('Gemini MCP: host does not support MCP server provider registration API; installing no-op shim for compatibility.');
+		try {
+			const existing = (vscode as any).lm ?? (vscode as any).mcp ?? undefined;
+			if (!existing || !existing.registerMcpServerDefinitionProvider) {
+				(vscode as any).lm = {
+					registerMcpServerDefinitionProvider: (id: string, provider: any) => {
+						output.appendLine(`Gemini MCP: registered no-op MCP provider (shim) for ${id}`);
+						return { dispose: () => output.appendLine(`Gemini MCP: disposed no-op MCP provider (shim) for ${id}`) };
+					}
+				};
+				// Ensure we clean up shim on deactivate
+				context.subscriptions.push({ dispose: () => { try { delete (vscode as any).lm; } catch {} } });
+			}
+		} catch (e) {
+			output.appendLine(`Gemini MCP: failed to install no-op shim: ${String(e)}`);
+		}
+	}
 
 	const configWatcher = vscode.workspace.onDidChangeConfiguration((event) => {
 		if (event.affectsConfiguration('geminiMcp')) {
+			void modelBridge.restart();
 			providerEmitter.fire();
 			const cfg = readConfig();
 			statusMonitor.updateConfig(cfg);
@@ -262,6 +304,61 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.showInformationMessage('Gemini MCP: diagnosis written to Output -> "Gemini CLI MCP"');
 	});
 	context.subscriptions.push(diagnoseCmd);
+
+	const orchestrateCmd = vscode.commands.registerCommand('geminiMcp.orchestrateReview', async () => {
+		output.show(true);
+		output.appendLine('Gemini MCP: starting orchestrated review...');
+		try {
+			const cfg = readConfig();
+			await runOrchestrator(cfg, output);
+			output.appendLine('Gemini MCP: orchestrated review finished.');
+		} catch (err) {
+			output.appendLine(`Orchestrator failed: ${String(err)}`);
+		}
+	});
+	context.subscriptions.push(orchestrateCmd);
+
+	const invokeCmd = vscode.commands.registerCommand('geminiMcp.invokeTool', async (toolName?: string, args?: any) => {
+		output.show(true);
+		const cfg = readConfig();
+		try {
+			if (!toolName) {
+				const picks = [
+					'gemini.task.submit',
+					'gemini.task.status',
+					'gemini.task.list',
+					'gemini.task.tail',
+					'gemini.task.cancel',
+					'gemini.task.prune',
+					'gemini.task.suggest',
+					'fs.read',
+					'fs.write',
+					'code.analyze',
+					'code.format.batch',
+					'tests.run'
+				];
+				toolName = await vscode.window.showQuickPick(picks, { placeHolder: 'Select MCP tool to invoke' });
+				if (!toolName) return;
+			}
+			if (!args) {
+				const json = await vscode.window.showInputBox({ placeHolder: 'Enter tool arguments as JSON (or leave blank for defaults)' });
+				if (json && json.trim().length) args = JSON.parse(json);
+			}
+			// Use orchestrator helper to run tool via MCP
+			const mc = await mcpClientModule.getMcpClient(cfg, output);
+			const client: any = mc.client;
+			const res = await client.callTool({ name: toolName, arguments: args ?? {} });
+			const first = res.content?.find((c: any) => c.type === 'text');
+			if (first && first.text) {
+				output.appendLine(`Tool ${toolName} -> ${first.text}`);
+			} else {
+				output.appendLine(`Tool ${toolName} -> ${JSON.stringify(res).slice(0, 2000)}`);
+			}
+		} catch (err) {
+			output.appendLine(`invokeTool failed: ${String(err)}`);
+		}
+	});
+	context.subscriptions.push(invokeCmd);
 
 	const openLogCmd = vscode.commands.registerCommand('geminiMcp.openTaskLog', async (taskId: string) => {
 		if (!taskId) {

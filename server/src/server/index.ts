@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
+import { jsonSchemaToZod, dereferenceSchema } from '../lib/schemaUtils.js';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WorkerPool } from '../task/workerPool.js';
@@ -746,6 +747,10 @@ function readResourceText(text: string, taskId?: string) {
     };
 }
 
+// `jsonSchemaToZod` moved to `server/src/server/schemaUtils.ts`
+
+// `dereferenceSchema` moved to `server/src/server/schemaUtils.ts`
+
 function normalizeTemplateVariable(value?: string | string[]) {
     if (!value) {
         return undefined;
@@ -1304,11 +1309,72 @@ async function start() {
     await validateGeminiExecutable();
     await updateCliStatus('startup');
     await persistence.loadPersistedTasks();
+    // Load and register tool metadata from mcp.json (manifest)
+    await loadMcpManifest();
     await persistence.pruneOldTasks();
     await persistence.persistLiveStatus();
     startCliHealthWatcher();
     const transport = new StdioServerTransport();
     await server.connect(transport);
+}
+
+async function loadMcpManifest() {
+    try {
+        const manifestPath = path.join(workspaceRoot, 'mcp.json');
+        if (!(await fileExists(manifestPath))) {
+            // No manifest present; nothing to do
+            return;
+        }
+        const raw = await fs.readFile(manifestPath, 'utf8');
+        const manifest = JSON.parse(raw) as any;
+        console.log(`Loaded MCP manifest with ${((manifest.tools && manifest.tools.length) || 0)} tools`);
+        // Attach manifest to server for inspection by clients if needed
+        try {
+            (server as any)._mcpManifest = manifest;
+        } catch { /* ignore */ }
+
+        const manifestDir = path.dirname(manifestPath);
+        const externalCache: Record<string, any> = {};
+        for (const t of manifest.tools || []) {
+            try {
+                // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
+                const hasTool = (server as any).hasTool?.(t.name) ?? Boolean((server as any)._tools && (server as any)._tools[t.name]);
+                if (hasTool) {
+                    // already registered by code; skip
+                    continue;
+                }
+                // Register a lightweight metadata-only handler for tools not implemented server-side yet.
+                // Convert the manifest's JSON Schema to a zod schema when possible,
+                // so clients/models receive a stricter inputSchema.
+                let resolvedArgs: any = undefined;
+                try {
+                    if (t.arguments) {
+                        resolvedArgs = await dereferenceSchema(t.arguments, manifest, manifestDir, externalCache);
+                    }
+                } catch (refErr) {
+                    console.warn(`Failed to dereference schema for tool ${t.name}:`, refErr);
+                    resolvedArgs = t.arguments;
+                }
+                const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
+                server.registerTool(
+                    t.name,
+                    {
+                        title: t.title ?? t.name,
+                        description: t.description ?? '',
+                        inputSchema: inputSchemaZod
+                    },
+                    async (_input, _extra) => {
+                        return textResponse({ error: 'Tool advertised in mcp.json but no server-side handler is implemented.' });
+                    }
+                );
+                console.log(`Advertised tool: ${t.name}`);
+            } catch (err) {
+                console.warn(`Failed to advertise tool ${t.name}:`, err);
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load mcp.json manifest:', err);
+    }
 }
 
 registerShutdownHandlers();

@@ -1,9 +1,15 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
+import os from 'node:os';
 
-import { GeminiConfig, TimeoutConfig, PriorityConfig } from './types';
+import { GeminiConfig, TimeoutConfig, PriorityConfig, ModelBridgeConfig, ModelBridgeMode } from './types';
 
 // Utility helpers for reading extension configuration and small format helpers.
+
+const WINDOWS_STDIO_PATH = String.raw`\\.\pipe\gemini-mcp-bridge`;
+const DEFAULT_STDIO_PATH = os.platform() === 'win32'
+    ? WINDOWS_STDIO_PATH
+    : path.join(os.tmpdir(), 'gemini-mcp-bridge.sock');
 
 /**
  * Read the `geminiMcp` configuration from VS Code and return a typed config object.
@@ -22,6 +28,32 @@ export function readConfig(): GeminiConfig {
         codeFormat: config.get<number>('defaultPriorities.codeFormat', 0),
         taskSubmit: config.get<number>('defaultPriorities.taskSubmit', 0)
     };
+    const defaultAllowedTools = [
+        'gemini.task.submit',
+        'gemini.task.suggest',
+        'gemini.task.list',
+        'gemini.task.status',
+        'gemini.task.tail',
+        'gemini.task.cancel',
+        'gemini.task.prune',
+        'fs.read',
+        'fs.write',
+        'code.analyze',
+        'code.format.batch',
+        'tests.run'
+    ];
+    const mode = config.get<ModelBridgeMode>('modelBridge.mode', 'stdio');
+    const modelBridge: ModelBridgeConfig = {
+        enabled: config.get<boolean>('modelBridge.enabled', false),
+        mode,
+        httpPort: config.get<number>('modelBridge.httpPort', 46871),
+        stdioPath: config.get<string>('modelBridge.stdioPath', DEFAULT_STDIO_PATH),
+        authToken: config.get<string>('modelBridge.authToken', ''),
+        allowedTools: config.get<string[]>('modelBridge.allowedTools', defaultAllowedTools),
+        allowOrchestrator: config.get<boolean>('modelBridge.allowOrchestrator', true),
+        requestTimeoutMs: config.get<number>('modelBridge.requestTimeoutMs', 120000),
+        captureSdkMessageId: config.get<'sdkHook' | 'bestEffort' | 'disabled'>('modelBridge.captureSdkMessageId', 'bestEffort')
+    };
     return {
         geminiPath: config.get<string>('geminiPath', 'gemini'),
         maxWorkers: config.get<number>('maxWorkers', 3),
@@ -29,7 +61,8 @@ export function readConfig(): GeminiConfig {
         maxQueue: config.get<number>('maxQueue', 200),
         defaultTimeouts,
         defaultPriorities,
-        unhealthyStates: config.get<string[]>('unhealthyStates', ['missing'])
+        unhealthyStates: config.get<string[]>('unhealthyStates', ['missing']),
+        modelBridge
     };
 }
 

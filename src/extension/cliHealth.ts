@@ -11,6 +11,7 @@ export class GeminiCliHealth implements vscode.Disposable {
     private status: CliStatusSnapshot = { state: 'unknown', message: 'Gemini CLI health not checked yet.' };
     private checking: Promise<void> | undefined;
     private lastConfigKey: string | undefined;
+    private readonly DEBOUNCE_MS = 3000;
     private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
     readonly onDidChange = this.onDidChangeEmitter.event;
     private readonly output?: vscode.OutputChannel;
@@ -41,11 +42,32 @@ export class GeminiCliHealth implements vscode.Disposable {
     }
 
     private runCheck(config: GeminiConfig) {
+        const configKey = this.buildConfigKey(config);
+        // If a check is already running, return it so callers can await the same promise.
         if (this.checking) {
             return this.checking;
         }
+
+        // If the requested config matches the last requested config and we
+        // recently checked, skip re-checking to avoid thrash.
+        const lastChecked = this.status?.lastChecked ?? 0;
+        const now = Date.now();
+        if (this.lastConfigKey === configKey && now - lastChecked < this.DEBOUNCE_MS) {
+            // Diagnostic
+            try {
+                const skipMsg = `Skipping health check; recent check performed ${now - lastChecked}ms ago for ${configKey}`;
+                if (this.output) this.output.appendLine(`DEBUG: ${skipMsg}`); else console.log(skipMsg);
+            } catch { /* ignore */ }
+            return Promise.resolve();
+        }
+
+        // update the remembered config key and mark as checking
+        this.lastConfigKey = configKey;
+        const prevState = this.status && this.status.state;
         this.status = { state: 'checking', message: 'Checking Gemini CLI...' };
-        this.onDidChangeEmitter.fire();
+        if (prevState !== this.status.state) {
+            this.onDidChangeEmitter.fire();
+        }
         // Diagnostic: report platform and configured geminiPath to help debug
         try {
             const msg = `Gemini CLI health check: platform=${process.platform} arch=${process.arch} configuredGeminiPath=${String(

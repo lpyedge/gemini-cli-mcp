@@ -1,0 +1,33 @@
+name: Test Matrix (capture modes)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        capture_mode: [ sdkHook, bestEffort, disabled ]
+        node-version: [ 18.x, 20.x ]
+    env:
+      GEMINI_CAPTURE_MODE: ${{ matrix.capture_mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install
+        run: npm ci
+
+      - name: Run tests (capture mode ${{ matrix.capture_mode }})
+        run: |
+          echo "Running tests with GEMINI_CAPTURE_MODE=$GEMINI_CAPTURE_MODE"
+          npm test --silent

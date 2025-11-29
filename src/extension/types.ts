@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 
 // Shared types used by the extension modules
 
+export type ModelBridgeMode = 'stdio' | 'http' | 'both';
+
 export interface GeminiConfig {
     geminiPath: string;
     maxWorkers: number;
@@ -10,6 +12,7 @@ export interface GeminiConfig {
     defaultTimeouts: TimeoutConfig;
     defaultPriorities: PriorityConfig;
     unhealthyStates?: string[];
+    modelBridge: ModelBridgeConfig;
 }
 
 export interface TimeoutConfig {
@@ -24,6 +27,23 @@ export interface PriorityConfig {
     codeAnalyze: number;
     codeFormat: number;
     taskSubmit: number;
+}
+
+export interface ModelBridgeConfig {
+    enabled: boolean;
+    mode: ModelBridgeMode;
+    httpPort: number;
+    stdioPath: string;
+    authToken?: string;
+    allowedTools: string[];
+    allowOrchestrator: boolean;
+    requestTimeoutMs?: number;
+    /**
+     * How the extension captures SDK-assigned message ids. 'sdkHook' prefers
+     * a stable SDK-provided hook, 'bestEffort' uses transport/protocol wrapping,
+     * 'disabled' turns off capture to avoid overhead.
+     */
+    captureSdkMessageId?: 'sdkHook' | 'bestEffort' | 'disabled';
 }
 
 export interface LiveStatusSnapshot {

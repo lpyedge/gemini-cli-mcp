@@ -16,14 +16,15 @@
     "compile": "npm run typecheck && npm run bundle",
     "watch": "node scripts/bundle.mjs --watch",
     "package": "npm run compile && node -e \"require('fs').mkdirSync('dist',{recursive:true});\" && vsce package --out dist/gemini-cli-mcp.vsix",
-    "test": "node scripts/run-all-tests.mjs"
+    "test": "node -r ./test/setup-vscode-mock.cjs scripts/run-all-tests.mjs"
   },
   "engines": {
     "vscode": ">=1.105.0"
   },
   "activationEvents": [
     "onStartupFinished",
-    "onView:geminiMcp.tasks"
+    "onView:geminiMcp.tasks",
+    "onCommand:geminiMcp.invokeTool"
   ],
   "contributes": {
     "configuration": {
@@ -102,14 +103,74 @@
           "minimum": -5,
           "maximum": 5,
           "description": "Default queue priority for gemini.task.submit tasks when the caller omits it."
+        },
+        "geminiMcp.unhealthyStates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "missing",
+            "quota_exhausted",
+            "unresponsive"
+          ],
+          "description": "Which Gemini CLI health states should mark the extension as unhealthy (red). Values can include 'missing', 'quota_exhausted', 'unresponsive', or 'error'. Default includes 'missing','quota_exhausted','unresponsive' so missing CLI, quota exhaustion, or service/unresponsive errors show a red state while other transient warnings do not."
+        },
+        "geminiMcp.modelBridge.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the HTTP automation bridge so local AI agents (Copilot, Copilot Chat, local models) can submit MCP tool calls programmatically."
+        },
+        "geminiMcp.modelBridge.httpPort": {
+          "type": "number",
+          "default": 46871,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "HTTP port that the automation bridge listens on for POST /call-tool and /orchestrate requests."
+        },
+        "geminiMcp.modelBridge.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token that incoming automation bridge calls must present via x-gemini-mcp-token or Authorization headers."
+        },
+        "geminiMcp.modelBridge.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 0,
+          "description": "Request timeout (ms) for bridge proxied MCP tool calls. Requests exceeding this will return 504 and attempt cancellation."
+        },
+        "geminiMcp.modelBridge.captureSdkMessageId": {
+          "type": "string",
+          "default": "bestEffort",
+          "enum": ["sdkHook", "bestEffort", "disabled"],
+          "description": "How the extension captures SDK-assigned message ids for observability: 'sdkHook' prefers a stable SDK-provided hook, 'bestEffort' uses transport/protocol wrapping, 'disabled' turns off capture (no overhead)."
+        },
+        "geminiMcp.modelBridge.allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "gemini.task.submit",
+            "gemini.task.suggest",
+            "gemini.task.list",
+            "gemini.task.status",
+            "gemini.task.tail",
+            "gemini.task.cancel",
+            "gemini.task.prune",
+            "fs.read",
+            "fs.write",
+            "code.analyze",
+            "code.format.batch",
+            "tests.run"
+          ],
+          "description": "Whitelist of MCP tools available to automation bridge callers; leave empty to allow all registered tools."
+        },
+        "geminiMcp.modelBridge.allowOrchestrator": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow POST /orchestrate so model agents can trigger the orchestrated review workflow. Set to false to restrict the bridge to single-tool calls."
         }
-      ,
-      "geminiMcp.unhealthyStates": {
-        "type": "array",
-        "items": { "type": "string" },
-        "default": ["missing", "quota_exhausted", "unresponsive"],
-        "description": "Which Gemini CLI health states should mark the extension as unhealthy (red). Values can include 'missing', 'quota_exhausted', 'unresponsive', or 'error'. Default includes 'missing','quota_exhausted','unresponsive' so missing CLI, quota exhaustion, or service/unresponsive errors show a red state while other transient warnings do not."
-      }
       }
     },
     "views": {
@@ -128,18 +189,25 @@
     ],
     "commands": [
       {
-        "command": "geminiMcp.showStatus",
-        "title": "Gemini CLI MCP: Show Worker Status"
-      },
-      {
-        "command": "geminiMcp.openTaskLog",
-        "title": "Gemini CLI MCP: Open Task Log"
-      }
-      ,
-      {
-        "command": "geminiMcp.diagnose",
-        "title": "Gemini CLI MCP: Diagnose Extension State"
-      }
+          "command": "geminiMcp.showStatus",
+          "title": "Gemini CLI MCP: Show Worker Status"
+        },
+        {
+          "command": "geminiMcp.openTaskLog",
+          "title": "Gemini CLI MCP: Open Task Log"
+        },
+        {
+          "command": "geminiMcp.diagnose",
+          "title": "Gemini CLI MCP: Diagnose Extension State"
+        },
+        {
+          "command": "geminiMcp.invokeTool",
+          "title": "Gemini CLI MCP: Invoke Tool"
+        },
+        {
+          "command": "geminiMcp.orchestrateReview",
+          "title": "Gemini CLI MCP: Orchestrate Review"
+        }
     ]
   },
   "devDependencies": {
@@ -152,9 +220,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.1.2",
+    "json-schema-to-zod": "^2.7.0",
     "zod": "^3.23.8"
-  }
-  ,
+  },
   "files": [
     "dist/**",
     "server/dist/**"

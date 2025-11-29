@@ -1,0 +1,118 @@
+{
+  "version": "1.0",
+  "name": "gemini-cli-mcp",
+  "description": "MCP manifest describing the Gemini CLI MCP surface exposed by this extension",
+  "tools": [
+    {
+      "name": "gemini.task.submit",
+      "title": "Submit Task",
+      "description": "Submit a long-running Gemini CLI task. Returns a taskId for tracking.",
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "tool": { "type": "string" },
+          "args": { "type": "object" },
+          "priority": { "type": "integer" },
+          "timeoutMs": { "type": "integer" }
+        },
+        "required": ["tool"]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "taskId": { "type": "string" },
+          "logUri": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "gemini.task.status",
+      "title": "Task Status",
+      "description": "Get current status/metadata for a submitted task.",
+      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" } }, "required": ["taskId"] },
+      "returns": { "type": "object" }
+    },
+    {
+      "name": "gemini.task.list",
+      "title": "List Tasks",
+      "description": "List recent tasks with optional filters.",
+      "arguments": { "type": "object", "properties": { "limit": { "type": "integer" }, "state": { "type": "string" } } },
+      "returns": { "type": "array" }
+    },
+    {
+      "name": "gemini.task.tail",
+      "title": "Tail Task Log",
+      "description": "Tail incremental logs for a task; returns chunks and next offset.",
+      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" }, "offset": { "type": "integer" } }, "required": ["taskId"] },
+      "returns": { "type": "object", "properties": { "chunk": { "type": "string" }, "nextOffset": { "type": "integer" }, "done": { "type": "boolean" } } }
+    },
+    {
+      "name": "gemini.task.cancel",
+      "title": "Cancel Task",
+      "description": "Request cancellation of a running or queued task.",
+      "arguments": { "type": "object", "properties": { "taskId": { "type": "string" } }, "required": ["taskId"] },
+      "returns": { "type": "object" }
+    },
+    {
+      "name": "gemini.task.prune",
+      "title": "Prune Tasks",
+      "description": "Prune completed tasks and old logs from storage.",
+      "arguments": { "type": "object", "properties": { "olderThanDays": { "type": "integer" } } },
+      "returns": { "type": "object" }
+    },
+    {
+      "name": "gemini.task.suggest",
+      "title": "Suggest Tasks",
+      "description": "Return suggested tasks or automation hints for the repository.",
+      "arguments": { "type": "object", "properties": { "limit": { "type": "integer" } } },
+      "returns": { "type": "array" }
+    },
+    {
+      "name": "fs.read",
+      "title": "Read File",
+      "description": "Read file contents from the task working directory. Returned content is a text blob.",
+      "arguments": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] },
+      "returns": { "type": "object", "properties": { "content": { "type": "string" } } }
+    },
+    {
+      "name": "fs.write",
+      "title": "Write File",
+      "description": "Write file contents to the task working directory. Overwrites by default.",
+      "arguments": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" }, "encoding": { "type": "string" } }, "required": ["path","content"] },
+      "returns": { "type": "object" }
+    },
+    {
+      "name": "code.analyze",
+      "title": "Code Analyze",
+      "description": "Perform code analysis on the given paths and return findings or a taskId for long analyses.",
+      "arguments": { "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } }, "prompt": { "type": "string" } }, "required": ["paths"] },
+      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" } } }, { "type": "object" } ] }
+    },
+    {
+      "name": "code.format.batch",
+      "title": "Code Format Batch",
+      "description": "Format code files in batch; may return a taskId for long runs.",
+      "arguments": { "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } }, "style": { "type": "string" } }, "required": ["paths"] },
+      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" } } }, { "type": "object" } ] }
+    },
+    {
+      "name": "tests.run",
+      "title": "Run Tests",
+      "description": "Execute the project's tests. Returns a taskId and location of logs for long-running runs.",
+      "arguments": { "type": "object", "properties": { "command": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["command"] },
+      "returns": { "oneOf": [ { "type": "object", "properties": { "taskId": { "type": "string" }, "logUri": { "type": "string" } } }, { "type": "object" } ] }
+    }
+  ],
+  "resources": [
+    {
+      "name": "taskLog",
+      "uriTemplate": "tasks://{taskId}/log",
+      "description": "URI template for task logs"
+    },
+    {
+      "name": "taskSummary",
+      "uriTemplate": "tasks://{taskId}/summary",
+      "description": "URI template for task summaries"
+    }
+  ]
+}

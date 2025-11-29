@@ -35,6 +35,31 @@ Bring Gemini CLI automations to GitHub Copilot inside VS Code. This extension ex
 
 Changing any of these settings reloads the MCP provider and refreshes the worker status view.
 
+### Model Automation Bridge
+
+- `geminiMcp.modelBridge.enabled` (default `false`): enable the HTTP bridge so local AI agents (Copilot, Copilot Chat, or any MCP-aware tool) can call MCP tools directly instead of relying on VS Code commands.
+- `geminiMcp.modelBridge.port` (default `46871`): the local loopback port the bridge listens on for inbound requests.
+- `geminiMcp.modelBridge.authToken`: optional bearer token that callers must provide via `x-gemini-mcp-token` or `Authorization: Bearer ...` headers; leave empty to allow unmanaged callers only from trusted sessions.
+- `geminiMcp.modelBridge.allowedTools`: whitelist of MCP tools that automation callers may invoke; leave empty to allow all registered tools (defaults include `gemini.task.*`, `fs.read`, `fs.write`, `code.analyze`, `code.format.batch`, `tests.run`).
+- `geminiMcp.modelBridge.allowOrchestrator` (default `true`): when `true`, the bridge also exposes `POST /orchestrate` so the orchestrated review workflow can be triggered programmatically.
+
+#### HTTP API
+
+- `POST http://127.0.0.1:<port>/call-tool` – body `{ "toolName": "code.analyze", "args": { ... } }`. Returns the MCP tool response as JSON. The bridge enforces the configured token and allowed tool list.
+- `POST http://127.0.0.1:<port>/orchestrate` – kicks off the `gemini.task.*` orchestrator bundle; respects the same authentication token.
+- `GET http://127.0.0.1:<port>/health` – returns `{ "ok": true }` if the bridge is enabled; useful for agents to wait until the service is ready.
+
+#### Sample curl
+
+```
+curl -X POST http://127.0.0.1:46871/call-tool \
+	-H "Content-Type: application/json" \
+	-H "x-gemini-mcp-token: ${yourToken}" \
+	-d '{"toolName":"code.analyze","args":{"paths":["src/extension.ts"],"prompt":"Review activation"}}'
+```
+
+The bridge gives Copilot-style agents the same model/tool surface that the extension already exposes via `geminiMcp.orchestrateReview` and `geminiMcp.invokeTool`. Keeping the bridge loopback-only and optionally token-protected makes it safe to integrate with trusted automation agents that run on your machine.
+
 ## Environment Variables (Server Side)
 
 Use these when launching VS Code or wrapping `code` in a script (e.g., `.envrc`, shell profile):
