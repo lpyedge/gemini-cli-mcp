@@ -12,6 +12,7 @@ import { runOrchestrator } from './extension/orchestrator';
 import * as mcpClientModule from './extension/mcpClient';
 import { ModelBridge } from './extension/modelBridge';
 import { getToolNames } from './extension/mcpManifest';
+import { logger } from './extension/logger';
 
 // The activate module wires the UI pieces together and registers the MCP provider
 // and extension commands. It intentionally keeps the wiring logic concise and
@@ -21,7 +22,6 @@ async function buildMcpDefinitions(
 	context: vscode.ExtensionContext,
 	cfg: any,
 	cliHealth: GeminiCliHealth,
-	output: vscode.OutputChannel,
 	initialHealthCheck: Promise<void>,
 	providerTriggerCount: number
 ): Promise<vscode.McpServerDefinition[]> {
@@ -30,7 +30,7 @@ async function buildMcpDefinitions(
 
 	// If CLI is unhealthy, return empty but log reason for diagnosis
 	if (!cliHealth.isHealthy()) {
-		output.appendLine('Gemini MCP: CLI not healthy; no MCP servers will be provided');
+		logger.warn('Gemini MCP: CLI not healthy; no MCP servers will be provided');
 		return servers;
 	}
 
@@ -43,18 +43,18 @@ async function buildMcpDefinitions(
 			void cliHealth.refresh(cfg).catch(() => {});
 		}
 	} catch (e) {
-		output.appendLine(`Gemini MCP: failed to refresh cli health: ${String(e)}`);
+		logger.error(`Gemini MCP: failed to refresh cli health: ${String(e)}`);
 	}
 
 	// Prefer an absolute path to the bundled server entry. Relying on cwd+relative
 	// args can fail if packaging/layout changes; use explicit path instead.
 	const serverCwd = vscode.Uri.joinPath(context.extensionUri, 'server').fsPath;
 	const serverEntry = vscode.Uri.joinPath(context.extensionUri, 'server', 'dist', 'index.js').fsPath;
-	output.appendLine(`Gemini MCP: resolved serverEntry=${serverEntry}`);
+	logger.info(`Gemini MCP: resolved serverEntry=${serverEntry}`);
 
 	// If the bundled server entry is missing, avoid returning a server definition.
 	if (!fs.existsSync(serverEntry)) {
-		output.appendLine(`Gemini MCP: server entry not found: ${serverEntry}. Skipping MCP server registration.`);
+		logger.warn(`Gemini MCP: server entry not found: ${serverEntry}. Skipping MCP server registration.`);
 		return servers;
 	}
 
@@ -67,10 +67,10 @@ async function buildMcpDefinitions(
 	if (!resolvedTaskCwd) {
 		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		if (workspaceRoot) {
-			output.appendLine(`Gemini MCP: configured taskCwd not resolvable; falling back to workspace root ${workspaceRoot}`);
+			logger.info(`Gemini MCP: configured taskCwd not resolvable; falling back to workspace root ${workspaceRoot}`);
 			resolvedTaskCwd = workspaceRoot;
 		} else {
-			output.appendLine('Gemini MCP: no workspace folder available and `taskCwd` not set or invalid. Skipping MCP server registration to avoid using VS Code install directory as taskCwd.');
+			logger.warn('Gemini MCP: no workspace folder available and `taskCwd` not set or invalid. Skipping MCP server registration to avoid using VS Code install directory as taskCwd.');
 			try {
 				void vscode.window.showErrorMessage(
 					'Gemini MCP: no workspace folder available and `geminiMcp.taskCwd` is not set. Please open a workspace or set `geminiMcp.taskCwd` to enable MCP servers.'
@@ -97,7 +97,7 @@ async function buildMcpDefinitions(
 		nodeBin = 'node';
 	}
 	const args = [serverEntry];
-	output.appendLine(`Gemini MCP: starting node executable=${nodeBin} args=${JSON.stringify(args)}`);
+	logger.info(`Gemini MCP: starting node executable=${nodeBin} args=${JSON.stringify(args)}`);
 
 	// Merge process.env to preserve PATH and other runtime environment values
 	const envVars: NodeJS.ProcessEnv = {
@@ -113,9 +113,9 @@ async function buildMcpDefinitions(
 		Object.keys(envVars).forEach((k) => {
 			if (k.startsWith('GEMINI_') || k === 'PATH') logged[k] = envVars[k];
 		});
-		output.appendLine(`Gemini MCP: env subset: ${JSON.stringify(logged)}`);
+		logger.info(`Gemini MCP: env subset: ${JSON.stringify(logged)}`);
 	} catch (e) {
-		output.appendLine(`Gemini MCP: failed to stringify env for logging: ${String(e)}`);
+		logger.warn(`Gemini MCP: failed to stringify env for logging: ${String(e)}`);
 	}
 
 	try {
@@ -126,7 +126,7 @@ async function buildMcpDefinitions(
 			const parsed = JSON.parse(Buffer.from(raw).toString('utf8'));
 			if (parsed && parsed.version) version = parsed.version;
 		} catch (err) {
-			output.appendLine(`Gemini MCP: failed to read package.json for version fallback: ${String(err)}`);
+			logger.warn(`Gemini MCP: failed to read package.json for version fallback: ${String(err)}`);
 		}
 
 		const sanitizedEnv: Record<string, string> = {};
@@ -137,7 +137,6 @@ async function buildMcpDefinitions(
 
 		const definition = createMcpDefinition({
 			vscodeApi: vscode,
-			output,
 			id: 'gemini-cli-mcp',
 			command: nodeBin,
 			args,
@@ -147,12 +146,12 @@ async function buildMcpDefinitions(
 		});
 		if (definition) {
 			servers.push(definition);
-			output.appendLine(`Gemini MCP: prepared ${servers.length} MCP server definition(s) for host.`);
+			logger.info(`Gemini MCP: prepared ${servers.length} MCP server definition(s) for host.`);
 		} else {
-			output.appendLine('Gemini MCP: host MCP API unavailable; cannot publish server definition.');
+			logger.warn('Gemini MCP: host MCP API unavailable; cannot publish server definition.');
 		}
 	} catch (err) {
-		output.appendLine(`Gemini MCP: failed to create MCP server definition ${String(err)}`);
+		logger.error(`Gemini MCP: failed to create MCP server definition ${String(err)}`);
 	}
 
 	return servers;
@@ -180,7 +179,6 @@ type CompatibleMcpDefinition = {
 
 interface DefinitionFactoryOptions {
 	vscodeApi: typeof vscode;
-	output: vscode.OutputChannel;
 	id: string;
 	command: string;
 	args: string[];
@@ -190,7 +188,7 @@ interface DefinitionFactoryOptions {
 }
 
 function createMcpDefinition(options: DefinitionFactoryOptions): vscode.McpServerDefinition | undefined {
-	const { vscodeApi, output, id, command, args, env, version, cwd } = options;
+	const { vscodeApi, id, command, args, env, version, cwd } = options;
 	const cwdPath = cwd?.fsPath ?? cwd;
 	const hostLm: any = (vscodeApi as any).lm ?? (vscodeApi as any).mcp ?? (vscodeApi as any);
 
@@ -218,10 +216,10 @@ function createMcpDefinition(options: DefinitionFactoryOptions): vscode.McpServe
 			if ('displayName' in def && !compatDef.displayName) {
 				compatDef.displayName = 'Gemini CLI MCP';
 			}
-			output.appendLine('Gemini MCP: MCP definition created via ctor path.');
+			logger.info('Gemini MCP: MCP definition created via ctor path.');
 			return def;
 		} catch (error) {
-			output.appendLine(`Gemini MCP: ctor-based MCP definition failed: ${String(error)}`);
+			logger.warn(`Gemini MCP: ctor-based MCP definition failed: ${String(error)}`);
 		}
 	}
 
@@ -251,10 +249,10 @@ function createMcpDefinition(options: DefinitionFactoryOptions): vscode.McpServe
 					}
 				}
 			});
-			output.appendLine('Gemini MCP: MCP definition created via factory path.');
+			logger.info('Gemini MCP: MCP definition created via factory path.');
 			return result;
 		} catch (error) {
-			output.appendLine(`Gemini MCP: factory-based MCP definition failed: ${String(error)}`);
+			logger.warn(`Gemini MCP: factory-based MCP definition failed: ${String(error)}`);
 		}
 	}
 
@@ -275,7 +273,7 @@ function createMcpDefinition(options: DefinitionFactoryOptions): vscode.McpServe
 			options: { cwd: cwdPath }
 		}
 	};
-	output.appendLine('Gemini MCP: falling back to plain MCP definition object; host compatibility may vary.');
+	logger.info('Gemini MCP: falling back to plain MCP definition object; host compatibility may vary.');
 	return fallback as unknown as vscode.McpServerDefinition;
 }
 
@@ -287,12 +285,9 @@ export function activate(context: vscode.ExtensionContext) {
 	statusItem.show();
 	context.subscriptions.push(statusItem);
 
-	// Create an output channel for detailed diagnostics early so other
-	// components (like GeminiCliHealth) can write diagnostic messages.
-	const output = vscode.window.createOutputChannel('Gemini CLI MCP');
-	context.subscriptions.push(output);
+	// The logger module manages the OutputChannel; no local channel needed here.
 
-	const cliHealth = new GeminiCliHealth(output);
+		const cliHealth = new GeminiCliHealth();
 	context.subscriptions.push(cliHealth);
 
 	const providerEmitter = new vscode.EventEmitter<void>();
@@ -303,9 +298,9 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(cliHealth.onDidChange(() => {
 		try {
 			const s = cliHealth.getStatus();
-			output.appendLine(`Gemini MCP: CLI health changed -> ${JSON.stringify(s)}`);
+			logger.info(`Gemini MCP: CLI health changed -> ${JSON.stringify(s)}`);
 			if (s.state === 'ok' && lastHealthState !== 'ok') {
-				output.appendLine('Gemini MCP: CLI transitioned to healthy; scheduling MCP definition refresh.');
+				logger.info('Gemini MCP: CLI transitioned to healthy; scheduling MCP definition refresh.');
 				setTimeout(() => providerEmitter.fire(), 0);
 			}
 			lastHealthState = s.state;
@@ -321,7 +316,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const statusMonitor = new TaskStatusMonitor(context, statusItem, taskTreeProvider, cliHealth);
 	context.subscriptions.push(statusMonitor);
 
-	const modelBridge = new ModelBridge(output);
+		const modelBridge = new ModelBridge();
 	context.subscriptions.push(modelBridge);
 	void modelBridge.start();
 
@@ -332,7 +327,7 @@ export function activate(context: vscode.ExtensionContext) {
 	let providerTriggerCount = 0;
 	providerEmitter.event(() => {
 		providerTriggerCount += 1;
-		output.appendLine(`Gemini MCP: providerEmitter fired (${providerTriggerCount} times)`);
+		logger.info(`Gemini MCP: providerEmitter fired (${providerTriggerCount} times)`);
 	});
 	// NOTE: do not fire providerEmitter directly from cliHealth.onDidChange.
 	// Firing the provider on every health change causes a feedback loop:
@@ -348,10 +343,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const providerObj = {
 		onDidChangeMcpServerDefinitions: providerEmitter.event,
 		provideMcpServerDefinitions: async () => {
-			output.appendLine(`Gemini MCP: provideMcpServerDefinitions called (#${providerTriggerCount + 1})`);
+			logger.info(`Gemini MCP: provideMcpServerDefinitions called (#${providerTriggerCount + 1})`);
 			await initialHealthCheck.catch(() => {});
 			const cfg = readConfig();
-			return buildMcpDefinitions(context, cfg, cliHealth, output, initialHealthCheck, providerTriggerCount);
+				return buildMcpDefinitions(context, cfg, cliHealth, initialHealthCheck, providerTriggerCount);
 		},
 		resolveMcpServerDefinition: async (server: any) => server
 	};
@@ -371,27 +366,27 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(provider);
 		providerRegistered = true;
 	} else {
-		output.appendLine('Gemini MCP: host does not support MCP server provider registration API; installing no-op shim for compatibility.');
+		logger.warn('Gemini MCP: host does not support MCP server provider registration API; installing no-op shim for compatibility.');
 		try {
 			const existing = (globalThis as any).__geminiLmShim ?? (vscode as any).mcp ?? undefined;
 			if (!existing || !existing.registerMcpServerDefinitionProvider) {
 				(globalThis as any).__geminiLmShim = {
 					registerMcpServerDefinitionProvider: (id: string, provider: any) => {
-						output.appendLine(`Gemini MCP: registered no-op MCP provider (shim) for ${id}`);
-						return { dispose: () => output.appendLine(`Gemini MCP: disposed no-op MCP provider (shim) for ${id}`) };
+						logger.info(`Gemini MCP: registered no-op MCP provider (shim) for ${id}`);
+						return { dispose: () => logger.info(`Gemini MCP: disposed no-op MCP provider (shim) for ${id}`) };
 					}
 				};
 				// Ensure we clean up shim on deactivate
 				context.subscriptions.push({ dispose: () => { try { delete (globalThis as any).__geminiLmShim; } catch {} } });
 			}
 		} catch (e) {
-			output.appendLine(`Gemini MCP: failed to install no-op shim: ${String(e)}`);
+			logger.error(`Gemini MCP: failed to install no-op shim: ${String(e)}`);
 		}
 	}
 
 	if (providerRegistered) {
 		setTimeout(() => {
-			output.appendLine('Gemini MCP: firing providerEmitter to publish initial MCP definitions.');
+			logger.info('Gemini MCP: firing providerEmitter to publish initial MCP definitions.');
 			providerEmitter.fire();
 		}, 0);
 	}
@@ -444,32 +439,32 @@ export function activate(context: vscode.ExtensionContext) {
 		const resolvedTaskCwd = resolveTaskCwd(cfg.taskCwd) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 		const serverEntry = path.join(context.extensionUri.fsPath, 'server', 'dist', 'index.js');
 		const exists = fs.existsSync(serverEntry);
-		output.show(true);
-		output.appendLine('--- Gemini MCP diagnose ---');
-		output.appendLine(`config: ${JSON.stringify(cfg)}`);
-		output.appendLine(`resolvedTaskCwd: ${resolvedTaskCwd}`);
-		output.appendLine(`serverEntry: ${serverEntry}`);
-		output.appendLine(`serverEntry exists: ${exists}`);
-		output.appendLine(`cliHealth: ${JSON.stringify(cliHealth.getStatus())}`);
+		logger.show(true);
+		logger.info('--- Gemini MCP diagnose ---');
+		logger.info(`config: ${JSON.stringify(cfg)}`);
+		logger.info(`resolvedTaskCwd: ${resolvedTaskCwd}`);
+		logger.info(`serverEntry: ${serverEntry}`);
+		logger.info(`serverEntry exists: ${exists}`);
+		logger.info(`cliHealth: ${JSON.stringify(cliHealth.getStatus())}`);
 		vscode.window.showInformationMessage('Gemini MCP: diagnosis written to Output -> "Gemini CLI MCP"');
 	});
 	context.subscriptions.push(diagnoseCmd);
 
 	const orchestrateCmd = vscode.commands.registerCommand('geminiMcp.orchestrateReview', async () => {
-		output.show(true);
-		output.appendLine('Gemini MCP: starting orchestrated review...');
+		logger.show(true);
+		logger.info('Gemini MCP: starting orchestrated review...');
 		try {
 			const cfg = readConfig();
-			await runOrchestrator(cfg, output);
-			output.appendLine('Gemini MCP: orchestrated review finished.');
+			await runOrchestrator(cfg);
+			logger.info('Gemini MCP: orchestrated review finished.');
 		} catch (err) {
-			output.appendLine(`Orchestrator failed: ${String(err)}`);
+			logger.error(`Orchestrator failed: ${String(err)}`);
 		}
 	});
 	context.subscriptions.push(orchestrateCmd);
 
 	const invokeCmd = vscode.commands.registerCommand('geminiMcp.invokeTool', async (toolName?: string, args?: any) => {
-		output.show(true);
+		logger.show(true);
 		const cfg = readConfig();
 		try {
 			if (!toolName) {
@@ -486,17 +481,17 @@ export function activate(context: vscode.ExtensionContext) {
 				if (json && json.trim().length) args = JSON.parse(json);
 			}
 			// Use orchestrator helper to run tool via MCP
-			const mc = await mcpClientModule.getMcpClient(cfg, output);
+			const mc = await mcpClientModule.getMcpClient(cfg);
 			const client: any = mc.client;
 			const res = await client.callTool({ name: toolName, arguments: args ?? {} });
 			const first = res.content?.find((c: any) => c.type === 'text');
 			if (first && first.text) {
-				output.appendLine(`Tool ${toolName} -> ${first.text}`);
+				logger.info(`Tool ${toolName} -> ${first.text}`);
 			} else {
-				output.appendLine(`Tool ${toolName} -> ${JSON.stringify(res).slice(0, 2000)}`);
+				logger.debug(`Tool ${toolName} -> ${JSON.stringify(res).slice(0, 2000)}`);
 			}
 		} catch (err) {
-			output.appendLine(`invokeTool failed: ${String(err)}`);
+			logger.error(`invokeTool failed: ${String(err)}`);
 		}
 	});
 	context.subscriptions.push(invokeCmd);

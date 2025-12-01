@@ -1,15 +1,16 @@
 import * as vscode from 'vscode';
 import { getMcpClient, callTool, closeMcpClient } from './mcpClient';
 import { getToolNames, getToolSampleArgs } from './mcpManifest';
+import { logger } from './logger';
 
 type Submission = { label: string; tool: string; args?: any };
 
-export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
+export async function runOrchestrator(cfg: any) {
   // Create example submissions — prefer generating from `mcp.json` so the manifest
   // is the single source of truth. Fall back to an inline list if manifest is missing.
   const manifestToolNames = getToolNames();
-  if (!manifestToolNames || manifestToolNames.length === 0) {
-    output.appendLine('Orchestrator: no tools found in mcp.json; aborting orchestrator run.');
+    if (!manifestToolNames || manifestToolNames.length === 0) {
+    logger.warn('orchestrator: no tools found in mcp.json; aborting orchestrator run.');
     // Close client if it was opened by getMcpClient earlier; ensure we still call closeMcpClient.
     await closeMcpClient();
     return;
@@ -20,9 +21,9 @@ export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
     return { label, tool, args: sample };
   });
 
-  output.appendLine(`Orchestrator: submitting ${submissions.length} tasks concurrently`);
+  logger.info('orchestrator: submitting tasks', { count: submissions.length });
 
-  const { client } = await getMcpClient(cfg, output);
+  const { client } = await getMcpClient(cfg);
 
   const submitPromises = submissions.map(async (s) => {
     try {
@@ -61,12 +62,12 @@ export async function runOrchestrator(cfg: any, output: vscode.OutputChannel) {
     immediate.push({ label: s.label, payload: raw ?? s.res });
   }
 
-  output.appendLine('\nOrchestrator report:');
+  logger.info('\nOrchestrator report:');
   for (const fail of failures) {
-    output.appendLine(`- ${fail.label}: FAIL - ${fail.error}`);
+    logger.warn(`- ${fail.label}: FAIL - ${fail.error}`);
   }
   for (const success of immediate) {
-    output.appendLine(`- ${success.label}: ${JSON.stringify(success.payload).slice(0, 1000)}`);
+    logger.info(`- ${success.label}: ${JSON.stringify(success.payload).slice(0, 1000)}`);
   }
 
   await closeMcpClient();

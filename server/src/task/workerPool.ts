@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { logger } from '../core/logger.js';
 
 export type JobHandler = (signal: AbortSignal) => Promise<void>;
 
@@ -127,12 +128,15 @@ export class WorkerPool {
                 this.active.set(entry.id, entry);
                 entry.handler(entry.controller.signal)
                     .catch((error) => {
-                        console.error(`WorkerPool job ${entry.id} failed`, error);
+                        logger.error('workerPool: job failed', {
+                            jobId: entry.id,
+                            error: String(error)
+                        });
                     })
                     .finally(() => {
                         this.active.delete(entry.id);
-                            // record finished job so retry can reference it later
-                            this.history.set(entry.id, entry);
+                        // record finished job so retry can reference it later
+                        this.history.set(entry.id, entry);
                         this.running -= 1;
                         this.emitter.emit('changed');
                         this.pump();

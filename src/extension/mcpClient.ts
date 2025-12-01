@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import { logger } from './logger';
 
 import { resolveTaskCwd } from './configUtils';
 
@@ -22,7 +23,7 @@ function sanitizeEnv(rawEnv: NodeJS.ProcessEnv) {
   return env;
 }
 
-export async function getMcpClient(cfg: any, output?: vscode.OutputChannel) {
+export async function getMcpClient(cfg: any) {
   if (cached) return cached;
   // Dynamically import the SDK at runtime so tests and ESM loaders do not
   // encounter synchronous CJS require() cycles. The SDK is published as
@@ -49,7 +50,7 @@ export async function getMcpClient(cfg: any, output?: vscode.OutputChannel) {
   const workspaceRoot = resolveTaskCwd(cfg?.taskCwd) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
   const extensionPath = vscode.extensions.getExtension('lpyedge.gemini-cli-mcp')?.extensionPath || process.cwd();
   const serverEntry = path.join(extensionPath, 'server', 'dist', 'index.js');
-  if (output) output.appendLine(`mcpClient: serverEntry=${serverEntry}`);
+  logger.info('mcpClient: serverEntry', { serverEntry });
   // Prefer persisted geminiPath in workspace .vscode/gemini-mcp/status.json when present
   let persistedGemini: string | undefined = undefined;
   try {
@@ -78,8 +79,46 @@ export async function getMcpClient(cfg: any, output?: vscode.OutputChannel) {
 
   const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry], env, stdout: 'pipe', stderr: 'pipe' });
   const tAny: any = transport;
-  tAny.stdout?.on && tAny.stdout?.on('data', (c: any) => output?.appendLine(`[server stdout] ${String(c)}`));
-  tAny.stderr?.on && tAny.stderr?.on('data', (c: any) => output?.appendLine(`[server stderr] ${String(c)}`));
+
+  // Forward server stdout/stderr into the extension logger, preserving level when available.
+  function forwardServerOutput(chunk: any, defaultLevel: 'info' | 'warn') {
+    try {
+      const text = String(chunk);
+      const lines = text.split(/\r?\n/);
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        // Expecting server logger to prefix lines like: "[server] [info] message..."
+        const m = line.match(/^\s*\[server\]\s*\[(info|warn|error|debug)\]\s*(.*)$/i);
+        if (m) {
+          const lvl = (m[1] || 'info').toLowerCase();
+          const msg = m[2] ?? '';
+          switch (lvl) {
+            case 'error':
+              logger.error(msg);
+              break;
+            case 'warn':
+              logger.warn(msg);
+              break;
+            case 'debug':
+              logger.debug(msg);
+              break;
+            default:
+              logger.info(msg);
+              break;
+          }
+        } else {
+          // No server prefix; fallback to default level depending on stream.
+          if (defaultLevel === 'warn') logger.warn(line); else logger.info(line);
+        }
+      }
+    } catch (e) {
+      try { logger.info('[server] ' + String(chunk)); } catch { /* swallow */ }
+    }
+  }
+
+  tAny.stdout?.on && tAny.stdout?.on('data', (c: any) => forwardServerOutput(c, 'info'));
+  tAny.stderr?.on && tAny.stderr?.on('data', (c: any) => forwardServerOutput(c, 'warn'));
 
   const client = new Client({ name: 'vscode-mcp-client', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
   await client.connect(transport);

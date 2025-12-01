@@ -1,6 +1,7 @@
 import fsSync from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { logger } from '../core/logger.js';
 
 export let geminiBin = resolveGeminiBinary((process.env.GEMINI_CLI ?? '').trim() || autoDiscoverGeminiBinary() || 'gemini');
 
@@ -14,12 +15,16 @@ function autoDiscoverGeminiBinary() {
     }
     const fromCommonPaths = findGeminiInCommonPaths();
     if (fromCommonPaths) {
-        console.log(`Gemini CLI auto-detected at ${fromCommonPaths}`);
+        logger.info('spawn: auto-detected Gemini CLI via common paths', {
+            geminiPath: fromCommonPaths
+        });
         return fromCommonPaths;
     }
     const fromWhere = findGeminiViaWhere();
     if (fromWhere) {
-        console.log(`Gemini CLI located via 'where': ${fromWhere}`);
+        logger.info("spawn: located Gemini CLI via 'where'", {
+            geminiPath: fromWhere
+        });
         return fromWhere;
     }
     return undefined;

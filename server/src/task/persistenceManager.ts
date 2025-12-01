@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { TaskRecord } from './types.js';
 import { persistTasksToFile, loadPersistedTasksFromFile } from './persistence.js';
+import { logger } from '../core/logger.js';
 
 export type PersistenceManager = {
     persistTasks: () => Promise<void>;
@@ -37,11 +38,14 @@ export function createPersistenceManager(options: {
 
     async function persistTasks() {
         try {
-            console.log(`[persistence] Persisting ${tasks.size} tasks to ${stateFile}`);
+            logger.info('persistence: persisting task snapshot', {
+                taskCount: tasks.size,
+                stateFile
+            });
             await persistTasksToFile(stateFile, tasks);
-            console.log('[persistence] Persisted tasks successfully');
+            logger.info('persistence: task snapshot persisted');
         } catch (error) {
-            console.error('[persistence] Failed to persist tasks', error);
+            logger.error('persistence: failed to persist tasks', String(error));
             throw error;
         }
     }
@@ -52,7 +56,9 @@ export function createPersistenceManager(options: {
         }
         persistTimer = setTimeout(() => {
             persistTimer = undefined;
-            persistTasks().catch((error) => console.error('Failed to persist Gemini CLI MCP task state', error));
+            persistTasks().catch((error) =>
+                logger.error('persistence: failed to persist Gemini CLI MCP task state', String(error))
+            );
         }, PERSIST_DEBOUNCE_MS);
     }
 
@@ -62,7 +68,9 @@ export function createPersistenceManager(options: {
         }
         statusPersistTimer = setTimeout(() => {
             statusPersistTimer = undefined;
-            persistLiveStatus().catch((error) => console.error('Failed to persist Gemini CLI MCP live status', error));
+            persistLiveStatus().catch((error) =>
+                logger.error('persistence: failed to persist Gemini CLI MCP live status', String(error))
+            );
         }, PERSIST_DEBOUNCE_MS);
     }
 
@@ -70,11 +78,15 @@ export function createPersistenceManager(options: {
         try {
             await fs.mkdir(path.dirname(statusFile), { recursive: true });
             const payload = buildLiveStatusPayload();
-            console.log(`[persistence] Writing live status (running=${payload.running}, queued=${payload.queued}) to ${statusFile}`);
+            logger.info('persistence: writing live status', {
+                running: payload.running,
+                queued: payload.queued,
+                statusFile
+            });
             await fs.writeFile(statusFile, JSON.stringify(payload, null, 2), 'utf8');
-            console.log('[persistence] Wrote live status successfully');
+            logger.info('persistence: live status persisted');
         } catch (error) {
-            console.error('[persistence] Failed to write live status', error);
+            logger.error('persistence: failed to write live status', String(error));
             throw error;
         }
     }
@@ -171,16 +183,18 @@ export function createPersistenceManager(options: {
             pool.on('changed', () => {
                 try {
                     scheduleStatusSnapshot();
-                    void persistLiveStatus().catch((err) => console.error('[persistence] Failed to persist live status (pool change)', err));
+                    void persistLiveStatus().catch((err) =>
+                        logger.error('persistence: failed to persist live status after pool change', String(err))
+                    );
                 } catch (err) {
-                    console.error('[persistence] Error handling pool change event', err);
+                    logger.error('persistence: error handling pool change event', String(err));
                 }
             });
             pool.on('queue', () => {
                 try {
                     scheduleStatusSnapshot();
                 } catch (err) {
-                    console.error('[persistence] Error handling pool queue event', err);
+                    logger.error('persistence: error handling pool queue event', String(err));
                 }
             });
         }

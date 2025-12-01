@@ -9,6 +9,7 @@ import { readConfig } from './configUtils';
 import { ModelBridgeConfig } from './types';
 import { getMcpClient, callTool } from './mcpClient';
 import { runOrchestrator } from './orchestrator';
+import { logger } from './logger';
 
 
 interface BridgeResponder {
@@ -64,7 +65,7 @@ async function tryConnectOnce(socketPath: string, timeout = 200) {
   });
 }
 
-export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, onConnection?: (socket: import('node:net').Socket, cfg?: any) => void) {
+export async function startStdioBridge(cfg: any, onConnection?: (socket: import('node:net').Socket, cfg?: any) => void) {
   const chosen = defaultSocketPath(cfg?.stdioPath);
   let socketPath = chosen;
   if (process.platform !== 'win32') {
@@ -77,11 +78,11 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
   if (process.platform !== 'win32' && fs.existsSync(socketPath)) {
     try {
       await tryConnectOnce(socketPath, 200);
-      output?.appendLine(`ModelBridge stdio: existing active socket at ${socketPath}`);
+      logger.info('modelBridge: existing active socket', { socketPath });
       return { server: null as any, path: socketPath, active: true };
     } catch (e) {
       try { fs.unlinkSync(socketPath); } catch (err) {
-        output?.appendLine(`ModelBridge stdio: failed to remove stale socket ${socketPath}: ${String(err)}`);
+        logger.warn('modelBridge: failed to remove stale socket', { socketPath, error: String(err) });
       }
     }
   }
@@ -92,7 +93,7 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
         onConnection(socket, cfg);
         return;
       } catch (e) {
-        output?.appendLine(`ModelBridge stdio: onConnection handler threw: ${String(e)}`);
+          logger.warn('modelBridge: onConnection handler threw', String(e));
       }
     }
     socket.setEncoding('utf8');
@@ -106,13 +107,13 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
         if (!raw) continue;
         try {
           const payload = JSON.parse(raw);
-          output?.appendLine(`[stdio bridge request] ${JSON.stringify(payload).slice(0,2000)}`);
+            logger.info('[stdio bridge request] ' + JSON.stringify(payload).slice(0,2000));
         } catch (err) {
-          output?.appendLine(`[stdio bridge] json parse error: ${String(err)}`);
+          logger.warn('[stdio bridge] json parse error', String(err));
         }
       }
     });
-    socket.on('error', (err) => output?.appendLine(`ModelBridge stdio client socket error: ${String(err)}`));
+    socket.on('error', (err) => logger.warn(`ModelBridge stdio client socket error: ${String(err)}`));
   });
 
   let attempts = 0;
@@ -133,7 +134,7 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
       if (msg && msg.toLowerCase().includes('eaddrinuse') && attempts < maxAttempts) {
         try {
           await tryConnectOnce(socketPath, 200);
-          output?.appendLine(`ModelBridge stdio: socket ${socketPath} in use by active server`);
+          logger.info('modelBridge: socket in use by active server', { socketPath });
           return { server: null as any, path: socketPath, active: true };
         } catch {
           try { fs.unlinkSync(socketPath); } catch {}
@@ -146,7 +147,7 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
   }
 
   if (process.platform !== 'win32') {
-    try { fs.chmodSync(socketPath, 0o600); } catch (err) { output?.appendLine(`ModelBridge stdio: chmod failed for ${socketPath}: ${String(err)}`); }
+    try { fs.chmodSync(socketPath, 0o600); } catch (err) { logger.warn('modelBridge: chmod failed', { socketPath, error: String(err) }); }
   }
 
   try {
@@ -161,9 +162,9 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
         parsed.stdioUpdated = Date.now();
         await fsPromises.mkdir(path.dirname(statusFile), { recursive: true }).catch(() => {});
         await fsPromises.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
-        output?.appendLine(`ModelBridge stdio: persisted socket path ${socketPath} to ${statusFile}`);
+        logger.info('modelBridge: persisted socket path', { socketPath, statusFile });
       } catch (err) {
-        output?.appendLine(`ModelBridge stdio: failed to persist socket path: ${String(err)}`);
+        logger.warn('modelBridge: failed to persist socket path', String(err));
       }
     }
   } catch {}
@@ -172,20 +173,20 @@ export async function startStdioBridge(cfg: any, output?: vscode.OutputChannel, 
     if (process.platform !== 'win32') {
       try { fs.unlinkSync(socketPath); } catch {}
     }
-    output?.appendLine(`ModelBridge stdio: server closed and cleaned ${socketPath}`);
+    logger.info('modelBridge: server closed and cleaned', { socketPath });
   });
 
-  output?.appendLine(`ModelBridge stdio: listening on ${socketPath}`);
+  logger.info('modelBridge: listening', { socketPath });
   return { server, path: socketPath, active: false };
 }
 
-export async function stopStdioBridge(server: net.Server | null, socketPath?: string, output?: vscode.OutputChannel) {
+export async function stopStdioBridge(server: net.Server | null, socketPath?: string) {
   if (!server) return;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (socketPath && process.platform !== 'win32') {
     try { fs.unlinkSync(socketPath); } catch {}
   }
-  output?.appendLine(`ModelBridge stdio: stopped`);
+  logger.info('modelBridge: stopped');
 }
 
 
@@ -196,35 +197,34 @@ export class ModelBridge implements vscode.Disposable {
   private concurrentLimit = 4;
   private currentConcurrent = 0;
   private pendingQueue: Array<() => void> = [];
-
-  constructor(private output: vscode.OutputChannel) {}
+  constructor() {}
 
   async start() {
     await this.stop();
     const cfg = this.getBridgeConfig();
     if (!cfg.enabled) {
-      this.output.appendLine('ModelBridge: disabled via configuration.');
+      logger.info('ModelBridge: disabled via configuration.');
       return;
     }
 
     try {
-      const res = await startStdioBridge(cfg, this.output, (socket) => this.handleStdioConnection(socket, cfg));
+        const res = await startStdioBridge(cfg, (socket) => this.handleStdioConnection(socket, cfg));
       if (res && res.server) {
         this.stdioServer = res.server;
         this.stdioListener = res.path;
-        this.output.appendLine(`ModelBridge: stdio bridge listening on ${res.path}`);
+        logger.info(`ModelBridge: stdio bridge listening on ${res.path}`);
       } else if (res && res.active) {
-        this.output.appendLine(`ModelBridge: stdio bridge detected active listener at ${res.path}`);
+        logger.info(`ModelBridge: stdio bridge detected active listener at ${res.path}`);
       }
     } catch (error) {
-      this.output.appendLine(`ModelBridge: failed to start stdio bridge: ${String(error)}`);
+      logger.warn(`ModelBridge: failed to start stdio bridge: ${String(error)}`);
     }
   }
 
   async stop() {
     // stop stdio server
     if (this.stdioServer) {
-      await stopStdioBridge(this.stdioServer, this.stdioListener, this.output).catch(() => {});
+      await stopStdioBridge(this.stdioServer, this.stdioListener).catch(() => {});
       this.stdioServer = undefined;
       this.stdioListener = undefined;
     }
@@ -271,7 +271,7 @@ export class ModelBridge implements vscode.Disposable {
       }
     });
     socket.on('error', (error) => {
-      this.output.appendLine(`ModelBridge: stdio client error ${String(error)}`);
+      logger.warn(`ModelBridge: stdio client error ${String(error)}`);
     });
   }
 
@@ -304,7 +304,7 @@ export class ModelBridge implements vscode.Disposable {
     }
     try {
       const config = readConfig();
-      const cached = await getMcpClient(config, this.output);
+      const cached = await getMcpClient(config);
       const client = (cached && cached.client) ? cached.client : undefined;
       if (!client) {
         responder.respond(503, { id: requestId, error: 'mcp_unavailable' });
@@ -313,7 +313,7 @@ export class ModelBridge implements vscode.Disposable {
       // acquire concurrency slot
       await this.acquireSlot();
       this.activeCalls.set(requestId, { tool: toolName, startedAt: Date.now() });
-      this.output.appendLine(`[req=${requestId}] start tool=${toolName}`);
+      logger.info(`[req=${requestId}] start tool=${toolName}`);
       try {
         const timeoutMs = (cfg as any).requestTimeoutMs ?? 120000; // default 2min
         const controller = new AbortController();
@@ -331,7 +331,7 @@ export class ModelBridge implements vscode.Disposable {
           entry2.sdkMessageId = possibleSdkId as any;
           this.activeCalls.set(requestId, entry2);
         }
-        this.output.appendLine(`[req=${requestId}] done tool=${toolName} sdk=${possibleSdkId ?? 'unknown'}`);
+        logger.info(`[req=${requestId}] done tool=${toolName} sdk=${possibleSdkId ?? 'unknown'}`);
         responder.respond(200, { id: requestId, success: true, response: safeJson(result) });
       } catch (error) {
         const errAny = error as any;
@@ -340,20 +340,20 @@ export class ModelBridge implements vscode.Disposable {
         if (isTimeout) {
           // mark as timed out and abort the controller (this will trigger SDK cancellation notification)
           const callInfo = this.activeCalls.get(requestId);
-          if (callInfo) {
+            if (callInfo) {
             callInfo.timedOut = true;
             try { callInfo.controller?.abort(new Error('local-timeout')); } catch { /* ignore */ }
-            this.output.appendLine(`[req=${requestId}] timeout tool=${toolName} sdk=${callInfo.sdkMessageId ?? 'unknown'}`);
+            logger.warn(`[req=${requestId}] timeout tool=${toolName} sdk=${callInfo.sdkMessageId ?? 'unknown'}`);
           }
           responder.respond(504, { id: requestId, error: 'tool_timeout', message: msg });
         } else {
           const code = 'tool_failed';
-          this.output.appendLine(`[req=${requestId}] error tool=${toolName} sdk=${(this.activeCalls.get(requestId)?.sdkMessageId) ?? 'unknown'} message=${msg}`);
+          logger.warn(`[req=${requestId}] error tool=${toolName} sdk=${(this.activeCalls.get(requestId)?.sdkMessageId) ?? 'unknown'} message=${msg}`);
           responder.respond(500, { id: requestId, error: code, message: msg });
         }
       } finally {
         this.activeCalls.delete(requestId);
-        this.output.appendLine(`[req=${requestId}] cleaned tool=${toolName}`);
+        logger.info(`[req=${requestId}] cleaned tool=${toolName}`);
         this.releaseSlot();
       }
     } catch (error) {
@@ -391,7 +391,7 @@ export class ModelBridge implements vscode.Disposable {
     }
     try {
       const config = readConfig();
-      await runOrchestrator(config, this.output);
+      await runOrchestrator(config);
       responder.respond(200, { success: true });
     } catch (error) {
       responder.respond(500, { error: 'orchestrator_failed', message: String(error) });

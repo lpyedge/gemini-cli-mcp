@@ -13,6 +13,7 @@ import { terminateProcessTree, execGeminiCommand } from '../gemini/processUtils.
 import { buildSpawnCommand, setGeminiBin, geminiBin } from '../gemini/spawnHelpers.js';
 import { SILENT_EXEC_PROMPT, serializeErrorForClient, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv } from '../core/utils.js';
 import { createPersistenceManager } from '../task/persistenceManager.js';
+import { logger } from '../core/logger.js';
 export { buildSpawnCommand, setGeminiBin } from '../gemini/spawnHelpers.js';
 import { TaskRecord, TaskStatus } from '../task/types.js';
 
@@ -21,7 +22,7 @@ const workerCount = Number(process.env.GEMINI_MAX_WORKERS || '3');
 let rawWorkspaceRootEnv = (process.env.GEMINI_TASK_CWD ?? '').trim();
 if (!rawWorkspaceRootEnv) {
     if (!process.env.GEMINI_MCP_SKIP_START) {
-        console.error('Gemini CLI MCP server requires GEMINI_TASK_CWD to be set.');
+        logger.error('server: GEMINI_TASK_CWD must be defined before startup');
         process.exit(1);
     }
     // When running tests we allow skipping the startup checks; use temp dir as workspaceRoot.
@@ -77,9 +78,11 @@ try {
             if (persistedGemini && String(persistedGemini).trim().length > 0) {
                 try {
                     setGeminiBin(String(persistedGemini));
-                    console.log(`[server] Using persisted gemini path from status.json: ${String(persistedGemini)}`);
+                    logger.info('server: using persisted gemini path from status.json', {
+                        geminiPath: String(persistedGemini)
+                    });
                 } catch (e) {
-                    console.warn('[server] Failed to apply persisted gemini path:', e);
+                    logger.warn('server: failed to apply persisted gemini path', String(e));
                 }
             }
         } catch {
@@ -303,7 +306,12 @@ function markTaskStatus(task: TaskRecord, status: TaskStatus, error?: string) {
     task.updatedAt = Date.now();
     // diagnostic log to help trace state transitions
     try {
-        console.log(`[task] ${task.id} status ${prev} -> ${status} (jobId=${task.jobId ?? 'nil'})`);
+        logger.info('task: status transition', {
+            taskId: task.id,
+            from: prev,
+            to: status,
+            jobId: task.jobId ?? 'nil'
+        });
     } catch (err) {
         // ignore logging errors
     }
@@ -365,7 +373,10 @@ async function appendLogToFile(logFile: string, chunk: string) {
         await ensureStateDirs();
         await fs.appendFile(logFile, chunk, 'utf8');
     } catch (error) {
-        console.error(`Failed to append log to ${logFile}`, error);
+        logger.error('task: failed to append log chunk', {
+            logFile,
+            message: String(error)
+        });
     }
 }
 
@@ -440,10 +451,10 @@ async function handleShutdown(reason: string) {
             await releaseStateLock();
         } catch (err) {
             // best-effort: log and continue
-            console.error('Failed to release state lock', err);
+            logger.error('server: failed to release state lock', String(err));
         }
     } catch (error) {
-        console.error('Failed to flush tasks during shutdown', error);
+        logger.error('server: failed to flush tasks during shutdown', String(error));
     }
 }
 
@@ -545,7 +556,11 @@ async function updateCliStatus(reason: string) {
     cliCheckPromise = (async () => {
         try {
             const v = buildSpawnCommand(['--version']);
-            console.log(`[cli] Checking Gemini CLI status (reason=${reason}) with command: ${v.command} ${v.args.join(' ')}`);
+            logger.info('cli: checking status', {
+                reason,
+                command: v.command,
+                args: v.args
+            });
             const { stdout, stderr } = await execGeminiCommand(v.command, v.args);
             const versionLine =
                 stdout
@@ -564,7 +579,7 @@ async function updateCliStatus(reason: string) {
                 lastChecked: Date.now()
             };
             acceptingTasks = true;
-            console.log(`[cli] Gemini CLI ready (${versionLine})`);
+            logger.info('cli: ready', { version: versionLine });
         } catch (error) {
             const message = formatWorkspaceError(error);
             const state = classifyCliFailure(message);
@@ -572,7 +587,11 @@ async function updateCliStatus(reason: string) {
             // like 'missing' or 'quota_exhausted'. Generic 'error' should not
             // immediately force a global failure since it may be transient.
             const shouldForce = state !== 'error';
-            console.warn(`[cli] Failed to update Gemini CLI status (reason=${reason}, classified=${state}): ${message}`);
+            logger.warn('cli: failed to update status', {
+                reason,
+                state,
+                message
+            });
             enterCliFailure(state, `${message} [${reason}]`, { force: shouldForce });
         } finally {
             cliCheckPromise = undefined;
@@ -613,7 +632,11 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
     if (state === 'unknown') {
         return;
     }
-    console.warn(`[cli] Entering failure state=${state}, force=${options?.force === true}, message=${message}`);
+    logger.warn('cli: entering failure state', {
+        state,
+        force: options?.force === true,
+        message
+    });
     // Do not be aggressive about cancelling running tasks for transient
     // failures. Only force-cancel when we have a high-confidence unusable
     // state (e.g., 'missing' or 'quota_exhausted') or when caller set force.
@@ -672,7 +695,10 @@ function stopCliHealthWatcher() {
 // `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/core/utils.ts`
 
 async function start() {
-    console.log(`[server] Starting Gemini CLI MCP server (pid=${process.pid}, workspace=${workspaceRoot})`);
+    logger.info('server: starting', {
+        pid: process.pid,
+        workspace: workspaceRoot
+    });
     await validateGeminiExecutable();
     await updateCliStatus('startup');
     // If we have a discovered absolute gemini binary and the workspace
@@ -682,7 +708,7 @@ async function start() {
     try {
         await persistDiscoveredGeminiPathIfMissing();
     } catch (err) {
-        console.warn('Failed to persist discovered gemini path:', err);
+        logger.warn('server: failed to persist discovered gemini path', String(err));
     }
     await persistence.loadPersistedTasks();
     // Load and register tool metadata from mcp.json (manifest)
@@ -725,10 +751,13 @@ async function persistDiscoveredGeminiPathIfMissing() {
         parsed.geminiPath = String(geminiBin);
         parsed.updatedAt = Date.now();
         await fs.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
-        console.log(`[server] Persisted discovered gemini path to ${statusFile}: ${String(geminiBin)}`);
+        logger.info('server: persisted discovered gemini path', {
+            statusFile,
+            geminiPath: String(geminiBin)
+        });
     } catch (err) {
         // best-effort; do not fail startup
-        console.warn('persistDiscoveredGeminiPathIfMissing failed:', err);
+        logger.warn('server: persistDiscoveredGeminiPathIfMissing failed', String(err));
     }
 }
 
@@ -737,18 +766,20 @@ async function loadMcpManifest() {
         const manifestPath = path.join(workspaceRoot, 'mcp.json');
         if (!(await fileExists(manifestPath))) {
             // No manifest present; nothing to do
-            console.log(`[manifest] No manifest found at ${manifestPath}, skipping registration`);
+            logger.info('manifest: not found', { manifestPath });
             return;
         }
         const raw = await fs.readFile(manifestPath, 'utf8');
         const manifest = JSON.parse(raw) as any;
         const manifestValidation = manifestSchema.safeParse(manifest);
         if (!manifestValidation.success) {
-            console.error('Manifest validation failed; proceeding with raw manifest. Issues:', manifestValidation.error.issues);
+            logger.error('manifest: validation failed; proceeding with raw manifest', {
+                issues: manifestValidation.error.issues
+            });
         }
         const manifestData = manifestValidation.success ? manifestValidation.data : manifest;
         const toolEntries = Array.isArray(manifestData.tools) ? manifestData.tools : [];
-        console.log(`Loaded MCP manifest with ${toolEntries.length} tools`);
+        logger.info('manifest: loaded', { toolCount: toolEntries.length });
         // Attach manifest to server for inspection by clients if needed
         try {
             (server as any)._mcpManifest = manifestData;
@@ -760,11 +791,11 @@ async function loadMcpManifest() {
         for (const t of toolEntries) {
             try {
                 if (!t || typeof t !== 'object') {
-                    console.warn('[manifest] Skipping entry with invalid structure:', t);
+                    logger.warn('manifest: skipping entry with invalid structure', { entry: t });
                     continue;
                 }
                 if (typeof t.name !== 'string' || t.name.trim().length === 0) {
-                    console.warn('[manifest] Skipping entry without a valid name:', t);
+                    logger.warn('manifest: skipping entry without a valid name', { entry: t });
                     continue;
                 }
                 const toolName = t.name.trim();
@@ -781,7 +812,10 @@ async function loadMcpManifest() {
                         resolvedArgs = await dereferenceSchema(t.arguments, manifestData, manifestDir, externalCache);
                     }
                 } catch (refErr) {
-                    console.warn(`Failed to dereference schema for tool ${toolName}:`, refErr);
+                    logger.warn('manifest: failed to dereference schema', {
+                        toolName,
+                        error: String(refErr)
+                    });
                     resolvedArgs = t.arguments;
                 }
                 const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
@@ -805,28 +839,34 @@ async function loadMcpManifest() {
                             }
                         }
                     );
-                    console.log(`[manifest] Registered tool: ${toolName}`);
+                    logger.info('manifest: registered tool', { toolName });
                     advertisedTools.push(toolName);
                 } catch (regErr: any) {
                     const msg = String((regErr && regErr.message) || regErr);
                     if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
-                        console.log(`[manifest] Skipped duplicate tool: ${toolName}`);
+                        logger.info('manifest: skipped duplicate tool', { toolName });
                     } else {
-                        console.warn(`Failed to register manifest tool ${toolName}:`, regErr);
+                        logger.warn('manifest: failed to register tool', {
+                            toolName,
+                            error: String(regErr)
+                        });
                     }
                 }
             } catch (err) {
                 const fallbackName = (t && typeof t === 'object' && 'name' in t) ? (t as any).name : '<unknown>';
-                console.warn(`Failed to register manifest tool ${fallbackName}:`, err);
+                logger.warn('manifest: failed to register tool', {
+                    toolName: fallbackName,
+                    error: String(err)
+                });
             }
         }
         if (advertisedTools.length > 0) {
-            console.log(`[manifest] Tools available: ${advertisedTools.join(', ')}`);
+            logger.info('manifest: tools available', { tools: advertisedTools });
         } else {
-            console.warn('[manifest] No tools registered from manifest.');
+            logger.warn('manifest: no tools registered from manifest');
         }
     } catch (err) {
-        console.error('Failed to load mcp.json manifest:', err);
+        logger.error('manifest: failed to load mcp.json', String(err));
     }
 }
 
@@ -969,9 +1009,12 @@ async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: str
     return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
         try {
             const { command, args } = buildSpawnCommand(commandArgs);
-            console.log(
-                `[cli] Spawning Gemini CLI: ${command} ${args.join(' ')} (timeout=${options.timeoutMs ?? manifestToolTimeoutMs}ms, stdinBytes=${options.stdin ? options.stdin.length : 0})`
-            );
+            logger.info('cli: spawning Gemini CLI', {
+                command,
+                args,
+                timeoutMs: options.timeoutMs ?? manifestToolTimeoutMs,
+                stdinBytes: options.stdin ? options.stdin.length : 0
+            });
             const child = spawn(command, args, {
                 cwd: workspaceRoot,
                 stdio: ['pipe', 'pipe', 'pipe'],
@@ -1000,9 +1043,11 @@ async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: str
                       }
                       if (!settled) {
                           settled = true;
-                          console.warn(
-                              `[cli] Gemini CLI invocation timed out after ${timeoutMs}ms (command=${command} ${args.join(' ')})`
-                          );
+                          logger.warn('cli: invocation timed out', {
+                              timeoutMs,
+                              command,
+                              args
+                          });
                           reject(new Error(`Gemini CLI call timed out after ${timeoutMs}ms.`));
                       }
                   }, timeoutMs)
@@ -1035,18 +1080,26 @@ async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: str
                     clearTimeout(timer);
                 }
                 if (code === 0) {
-                    console.log(
-                        `[cli] Gemini CLI exited successfully (command=${command} ${args.join(' ')}, stdoutBytes=${stdout.length}, stderrBytes=${stderr.length})`
-                    );
+                    logger.info('cli: invocation succeeded', {
+                        command,
+                        args,
+                        stdoutBytes: stdout.length,
+                        stderrBytes: stderr.length
+                    });
                     resolve({ stdout, stderr });
                 } else {
                     const message = stderr.trim() || stdout.trim() || `Gemini CLI exited with code ${code}`;
-                    console.warn(`[cli] Gemini CLI exited with code ${code} (command=${command} ${args.join(' ')}): ${message}`);
+                    logger.warn('cli: invocation exited with non-zero code', {
+                        command,
+                        args,
+                        code,
+                        message
+                    });
                     reject(new Error(message));
                 }
             });
         } catch (error) {
-            console.error('[cli] Failed to launch Gemini CLI process:', error);
+            logger.error('cli: failed to launch Gemini CLI process', String(error));
             reject(error instanceof Error ? error : new Error(String(error)));
         }
     });
@@ -1057,29 +1110,43 @@ async function invokeManifestTool(toolName: string, args: Record<string, unknown
     const errors: string[] = [];
     for (const attempt of attempts) {
         try {
-            console.log(
-                `[manifest] Invoking tool ${toolName} via ${attempt.label} (args=${JSON.stringify(attempt.args)}, stdinBytes=${attempt.stdin ? attempt.stdin.length : 0})`
-            );
+            logger.info('manifest: invoking tool', {
+                toolName,
+                attempt: attempt.label,
+                args: attempt.args,
+                stdinBytes: attempt.stdin ? attempt.stdin.length : 0
+            });
             const { stdout } = await runGeminiCliCommand(attempt.args, { stdin: attempt.stdin, timeoutMs: attempt.timeoutMs });
             const trimmed = stdout.trim();
             if (!trimmed) {
-                console.warn(`[manifest] Tool ${toolName} via ${attempt.label} returned empty output`);
+                logger.warn('manifest: tool returned empty output', {
+                    toolName,
+                    attempt: attempt.label
+                });
                 errors.push(`${attempt.label}: empty output`);
                 continue;
             }
             try {
-                console.log(
-                    `[manifest] Tool ${toolName} via ${attempt.label} produced JSON (${Buffer.byteLength(trimmed, 'utf8')} bytes)`
-                );
+                logger.info('manifest: tool produced JSON output', {
+                    toolName,
+                    attempt: attempt.label,
+                    bytes: Buffer.byteLength(trimmed, 'utf8')
+                });
                 return JSON.parse(trimmed);
             } catch {
-                console.log(
-                    `[manifest] Tool ${toolName} via ${attempt.label} returned non-JSON text (${Buffer.byteLength(trimmed, 'utf8')} bytes)`
-                );
+                logger.info('manifest: tool produced text output', {
+                    toolName,
+                    attempt: attempt.label,
+                    bytes: Buffer.byteLength(trimmed, 'utf8')
+                });
                 return trimmed;
             }
         } catch (error) {
-            console.warn(`[manifest] Tool ${toolName} via ${attempt.label} failed: ${formatWorkspaceError(error)}`);
+            logger.warn('manifest: tool invocation failed', {
+                toolName,
+                attempt: attempt.label,
+                error: formatWorkspaceError(error)
+            });
             errors.push(`${attempt.label}: ${formatWorkspaceError(error)}`);
         }
     }
@@ -1093,7 +1160,7 @@ registerShutdownHandlers();
 // automatic start (used by unit tests).
 if (!process.env.GEMINI_MCP_SKIP_START) {
     start().catch((err) => {
-        console.error('Failed to start Gemini CLI MCP server', err);
+        logger.error('server: failed to start Gemini CLI MCP server', String(err));
         process.exit(1);
     });
 }

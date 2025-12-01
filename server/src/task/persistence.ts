@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import type { TaskRecord } from './types.js';
+import { logger } from '../core/logger.js';
 
 export async function persistTasksToFile(stateFile: string, tasks: Map<string, TaskRecord>) {
     const payload = Array.from(tasks.values()).map((task) => {
@@ -53,7 +54,7 @@ export async function loadPersistedTasksFromFile(
         }
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            console.error('Failed to load Gemini CLI MCP task state', error);
+            logger.error('persistence: failed to load Gemini CLI MCP task state', String(error));
         }
     }
 }

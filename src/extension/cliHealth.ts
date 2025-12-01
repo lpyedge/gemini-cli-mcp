@@ -1,12 +1,11 @@
 import type * as vscode from 'vscode';
-// Use runtime `require` to load the `vscode` extension API lazily.
-// We avoid `import.meta.url` here because this file is compiled to
-// CommonJS output by the build and `import.meta` usage causes TS1470.
+// Use runtime `require` to load the `vscode` extension API lazily for EventEmitter.
 declare const require: any;
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CliHealthState, CliStatusSnapshot, GeminiConfig } from './types';
+import { logger } from './logger';
 
 // Manages checking the Gemini CLI health and exposing a change event.
 // This class executes `gemini --version` to determine whether the CLI is present,
@@ -18,10 +17,7 @@ export class GeminiCliHealth implements vscode.Disposable {
     private readonly DEBOUNCE_MS = 3000;
     private readonly onDidChangeEmitter: vscode.EventEmitter<void>;
     readonly onDidChange: vscode.Event<void>;
-    private readonly output?: vscode.OutputChannel;
-
-    constructor(output?: vscode.OutputChannel) {
-        this.output = output;
+    constructor() {
         // Load the runtime `vscode` module lazily to avoid require-cycle
         // problems during tests that may preload an alternate implementation.
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-var-requires
@@ -32,7 +28,7 @@ export class GeminiCliHealth implements vscode.Disposable {
         this.onDidChangeEmitter = new vr.EventEmitter<void>();
         this.onDidChange = this.onDidChangeEmitter.event;
     }
-
+    
     dispose() {
         this.onDidChangeEmitter.dispose();
     }
@@ -69,7 +65,7 @@ export class GeminiCliHealth implements vscode.Disposable {
             // Diagnostic
             try {
                 const skipMsg = `Skipping health check; recent check performed ${now - lastChecked}ms ago for ${configKey}`;
-                if (this.output) this.output.appendLine(`DEBUG: ${skipMsg}`); else console.log(skipMsg);
+                logger.debug(skipMsg);
             } catch { /* ignore */ }
             return Promise.resolve();
         }
@@ -86,11 +82,7 @@ export class GeminiCliHealth implements vscode.Disposable {
             const msg = `Gemini CLI health check: platform=${process.platform} arch=${process.arch} configuredGeminiPath=${String(
                 config.geminiPath
             )}`;
-            if (this.output) {
-                this.output.appendLine(msg);
-            } else {
-                console.log(msg);
-            }
+            logger.info(msg);
         } catch (e) {
             // ignore logging errors
         }
@@ -113,11 +105,7 @@ export class GeminiCliHealth implements vscode.Disposable {
             // can still be detected. Log the situation for diagnostics.
             try {
                 const warn = `Configured geminiPath not found on disk: ${config.geminiPath}. Will attempt shell lookup.`;
-                if (this.output) {
-                    this.output.appendLine(`WARN: ${warn}`);
-                } else {
-                    console.warn(warn);
-                }
+                logger.warn(warn);
             } catch (e) {
                 /* ignore */
             }

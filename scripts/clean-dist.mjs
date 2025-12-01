@@ -23,7 +23,7 @@ function removeExcept(dir, keepNames = []) {
 
 // Keep these files in root dist
 const distDir = path.join(process.cwd(), 'dist');
-const keepDist = ['extension.js', 'gemini-cli-mcp.vsix'];
+const keepDist = [];
 // Also remove the extension/ directory entirely
 if (fs.existsSync(distDir)) {
   for (const name of fs.readdirSync(distDir)) {
@@ -37,9 +37,9 @@ if (fs.existsSync(distDir)) {
   }
 }
 
-// server/dist: keep only index.js and spawnHelpers.js
+// server/dist: remove everything so the bundle step can recreate it
 const serverDist = path.join(process.cwd(), 'server', 'dist');
-const keepServer = ['index.js', 'spawnHelpers.js'];
+const keepServer = [];
 removeExcept(serverDist, keepServer);
 
 console.log('clean-dist: completed');
