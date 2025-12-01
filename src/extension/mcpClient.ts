@@ -62,26 +62,11 @@ export async function getMcpClient(cfg: any) {
   const extensionPath = vscode.extensions.getExtension('lpyedge.gemini-cli-mcp')?.extensionPath || process.cwd();
   const serverEntry = path.join(extensionPath, 'server', 'dist', 'index.js');
   logger.info('mcpClient: serverEntry', { serverEntry });
-  // Prefer persisted geminiPath in workspace .vscode/gemini-mcp/status.json when present
-  let persistedGemini: string | undefined = undefined;
-  try {
-    const statusPath = path.join(workspaceRoot, '.vscode', 'gemini-mcp', 'status.json');
-    const raw = await fs.readFile(statusPath, 'utf8').catch(() => undefined);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as any;
-        persistedGemini = (parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath)) ? String(parsed.geminiPath || parsed.gemini || parsed.cliPath) : undefined;
-      } catch {
-        persistedGemini = undefined;
-      }
-    }
-  } catch {
-    persistedGemini = undefined;
-  }
-
+  // Do not fall back to reading workspace-persisted status.json for runtime.
+  // Server-provided MCP snapshot is authoritative; use configured geminiPath only.
   const rawEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    GEMINI_CLI: (persistedGemini && persistedGemini.trim().length > 0) ? persistedGemini : cfg.geminiPath,
+    GEMINI_CLI: cfg.geminiPath,
     GEMINI_MAX_WORKERS: String(Math.max(1, cfg.maxWorkers ?? 2)),
     GEMINI_TASK_CWD: workspaceRoot,
     GEMINI_MAX_QUEUE: String(Math.max(1, cfg.maxQueue ?? 200))

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { GeminiCliHealth, } from './cliHealth';
+// GeminiCliHealth removed: server snapshot is authoritative
 import { GeminiTaskTreeProvider } from './treeProvider';
 import { LiveStatusSnapshot, LiveTaskSummary } from './types';
 import { resolveTaskCwd, formatDuration } from './configUtils';
@@ -28,8 +28,7 @@ export class TaskStatusMonitor implements vscode.Disposable {
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly statusItem: vscode.StatusBarItem,
-        private readonly treeProvider: GeminiTaskTreeProvider,
-        private readonly cliHealth: GeminiCliHealth
+        private readonly treeProvider: GeminiTaskTreeProvider
     ) {
         // Initialize from latest known snapshot (if any) and subscribe to updates
         try {
@@ -48,11 +47,7 @@ export class TaskStatusMonitor implements vscode.Disposable {
             } catch {}
         });
         this.disposables.push(new vscode.Disposable(unsub));
-        this.disposables.push(
-            this.cliHealth.onDidChange(() => {
-                this.renderStatus();
-            })
-        );
+        // No local CLI health change subscriptions; server snapshot is authoritative
     }
 
     updateConfig(cfg: any) {
@@ -86,16 +81,18 @@ export class TaskStatusMonitor implements vscode.Disposable {
         const queued = snapshot?.queued ?? 0;
         const maxWorkers = snapshot?.maxWorkers ?? cfg?.maxWorkers ?? 0;
         const queueLimit = snapshot?.queueLimit ?? cfg?.maxQueue ?? 0;
-        const cliStatus = snapshot?.cliStatus ?? this.cliHealth.getStatus();
+        // If server hasn't provided a cliStatus, treat as waiting for server.
+        const cliStatus = snapshot?.cliStatus ?? undefined;
         const unhealthyStates = new Set<string>(this.config?.unhealthyStates ?? ['missing']);
         const cliHealthy = !cliStatus || !unhealthyStates.has(cliStatus.state);
         const overload =
             queueLimit > 0 ? queued / queueLimit >= 1 : false;
         const warning = !overload && queueLimit > 0 ? queued / queueLimit >= 0.8 : false;
-        this.statusItem.text = `$(hubot) Gemini ${running}/${queued}`;
-        const lastUpdated = snapshot
-            ? `${new Date(snapshot.updatedAt).toLocaleTimeString()} (${this.snapshotSource?.fsPath ?? 'unknown'})`
-            : 'No live data';
+        const waitingForServer = !cliStatus;
+        this.statusItem.text = waitingForServer ? '$(hubot) Gemini (waiting for server)' : `$(hubot) Gemini ${running}/${queued}`;
+        const lastUpdated = waitingForServer
+            ? 'Waiting for server snapshot'
+            : `${new Date(snapshot!.updatedAt).toLocaleTimeString()} (${this.snapshotSource?.fsPath ?? 'server'})`;
         this.statusItem.tooltip = this.buildTooltip(
             snapshot,
             running,
@@ -249,7 +246,64 @@ export class TaskStatusMonitor implements vscode.Disposable {
         } catch {
             // ignore
         }
-        this.snapshot = undefined;
-        this.snapshotSource = undefined;
+        // No live MCP snapshot available: fallback to reading persisted tasks
+        // from workspace `.vscode/gemini-mcp/tasks.json`. Other fields that
+        // used to come from `status.json` (cliStatus, maxWorkers, etc.) are
+        // intentionally left undefined to indicate waiting for server.
+        try {
+            const tasks: any[] = [];
+            for (const folder of vscode.workspace.workspaceFolders ?? []) {
+                const p = path.join(folder.uri.fsPath, '.vscode', 'gemini-mcp', 'tasks.json');
+                try {
+                    const raw = await fs.readFile(p, 'utf8').catch(() => undefined);
+                    if (!raw) continue;
+                    let parsed: any = undefined;
+                    try {
+                        parsed = JSON.parse(raw);
+                    } catch {
+                        parsed = undefined;
+                    }
+                    // persisted shape may be { tasks: [...] } or an array
+                    if (parsed) {
+                        if (Array.isArray(parsed)) {
+                            tasks.push(...parsed as any[]);
+                        } else if (Array.isArray(parsed.tasks)) {
+                            tasks.push(...parsed.tasks);
+                        } else if (Array.isArray(parsed.state) ) {
+                            tasks.push(...parsed.state);
+                        }
+                    }
+                } catch {
+                    // ignore read errors per-folder
+                }
+            }
+            // Normalize to LiveTaskSummary-like shape
+            const normalized = (tasks || []).map((t: any) => ({
+                id: t.id ?? t.taskId ?? (t && t.jobId) ?? 'unknown',
+                toolName: t.toolName ?? t.tool ?? 'unknown',
+                status: t.status ?? 'queued',
+                createdAt: t.createdAt ?? t.startedAt ?? Date.now(),
+                startedAt: t.startedAt,
+                updatedAt: t.updatedAt ?? Date.now(),
+                completedAt: t.completedAt,
+                lastLogLine: t.lastLogLine ?? t.log?.slice?.(-1) ?? undefined,
+                logLength: t.logLength ?? 0,
+                error: t.error
+            }));
+            this.snapshot = {
+                updatedAt: Date.now(),
+                running: normalized.filter((x: any) => x.status === 'running').length,
+                queued: normalized.filter((x: any) => x.status === 'queued').length,
+                maxWorkers: this.config?.maxWorkers ?? 0,
+                queueLimit: this.config?.maxQueue ?? 0,
+                cliStatus: undefined,
+                tasks: normalized
+            } as LiveStatusSnapshot;
+            this.snapshotSource = undefined;
+            return;
+        } catch {
+            this.snapshot = undefined;
+            this.snapshotSource = undefined;
+        }
     }
 }

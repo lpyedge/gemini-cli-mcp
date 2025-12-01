@@ -781,6 +781,12 @@ async function start() {
     } catch {
         // ignore notification failures
     }
+
+    // Emit an explicit ready line so the extension can detect that the
+    // server process has successfully started and bound its transport.
+    try {
+        logger.info('server: ready', { pid: process.pid, workspace: workspaceRoot });
+    } catch {}
 }
 
 async function persistDiscoveredGeminiPathIfMissing() {

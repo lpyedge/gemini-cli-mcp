@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 
 import { readConfig, resolveTaskCwd } from './extension/configUtils';
 // 'os' not used in this module; removed to avoid unused import
-import { GeminiCliHealth } from './extension/cliHealth';
+// GeminiCliHealth removed: server snapshot is now authoritative
 import { GeminiTaskTreeProvider } from './extension/treeProvider';
 import { TaskStatusMonitor } from './extension/statusMonitor';
 import { runOrchestrator } from './extension/orchestrator';
@@ -21,30 +21,9 @@ import { logger } from './extension/logger';
 async function buildMcpDefinitions(
 	context: vscode.ExtensionContext,
 	cfg: any,
-	cliHealth: GeminiCliHealth,
-	initialHealthCheck: Promise<void>,
 	providerTriggerCount: number
 ): Promise<vscode.McpServerDefinition[]> {
-	await initialHealthCheck.catch(() => {});
 	const servers: vscode.McpServerDefinition[] = [];
-
-	// If CLI is unhealthy, return empty but log reason for diagnosis
-	if (!cliHealth.isHealthy()) {
-		logger.warn('Gemini MCP: CLI not healthy; no MCP servers will be provided');
-		return servers;
-	}
-
-	// Rely on GeminiCliHealth to validate the configured geminiPath and report status.
-	// The health check will short-circuit if the binary is missing and will emit
-	// `onDidChange` so the extension can react (log, UI prompts, etc.).
-	// Ensure we at least initiated a health refresh for latest config.
-	try {
-		if (!cliHealth.isHealthy()) {
-			void cliHealth.refresh(cfg).catch(() => {});
-		}
-	} catch (e) {
-		logger.error(`Gemini MCP: failed to refresh cli health: ${String(e)}`);
-	}
 
 	// Prefer an absolute path to the bundled server entry. Relying on cwd+relative
 	// args can fail if packaging/layout changes; use explicit path instead.
@@ -287,41 +266,66 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// The logger module manages the OutputChannel; no local channel needed here.
 
-		const cliHealth = new GeminiCliHealth();
-	context.subscriptions.push(cliHealth);
-
 	const providerEmitter = new vscode.EventEmitter<void>();
 	context.subscriptions.push(providerEmitter);
-
-	// Log CLI health changes to the output channel for diagnostics
-	let lastHealthState = cliHealth.getStatus().state;
-	context.subscriptions.push(cliHealth.onDidChange(() => {
-		try {
-			const s = cliHealth.getStatus();
-			logger.info(`Gemini MCP: CLI health changed -> ${JSON.stringify(s)}`);
-			if (s.state === 'ok' && lastHealthState !== 'ok') {
-				logger.info('Gemini MCP: CLI transitioned to healthy; scheduling MCP definition refresh.');
-				setTimeout(() => providerEmitter.fire(), 0);
-			}
-			lastHealthState = s.state;
-		} catch (e) {
-			// swallow logging errors
-		}
-	}));
+	// No local CLI health gating: server snapshot is authoritative.
 
 	const taskTreeProvider = new GeminiTaskTreeProvider();
 	const treeRegistration = vscode.window.registerTreeDataProvider('geminiMcp.tasks', taskTreeProvider);
 	context.subscriptions.push(treeRegistration);
 
-	const statusMonitor = new TaskStatusMonitor(context, statusItem, taskTreeProvider, cliHealth);
+	const statusMonitor = new TaskStatusMonitor(context, statusItem, taskTreeProvider);
 	context.subscriptions.push(statusMonitor);
 
+		// Create ModelBridge instance but defer starting it until the server
+		// reports a healthy Gemini CLI via MCP snapshot. This prevents the
+		// extension from registering the bridge when the server-side CLI is
+		// not ready (requirement: only register when server reports cli ok).
 		const modelBridge = new ModelBridge();
-	context.subscriptions.push(modelBridge);
-	void modelBridge.start();
+		context.subscriptions.push(modelBridge);
+
+		// Subscribe to MCP status snapshots so we can start/stop the bridge
+		// based on server-reported CLI health.
+		try {
+			const unsubSnapshot = (mcpClientModule as any).onStatusSnapshot((s: any) => {
+				try {
+					const cliState = s && s.cliStatus && s.cliStatus.state ? String(s.cliStatus.state) : undefined;
+					if (cliState === 'ok') {
+						// start bridge if not already started
+						try {
+							void modelBridge.start();
+							logger.info('Gemini MCP: modelBridge started after server reported CLI ok');
+						} catch (e) {
+							logger.warn('Gemini MCP: failed to start modelBridge after snapshot', String(e));
+						}
+					} else {
+						// stop bridge if server reports not-ok
+						try {
+							void modelBridge.stop();
+							logger.info('Gemini MCP: modelBridge stopped because server CLI not healthy');
+						} catch (e) {
+							// ignore
+						}
+					}
+				} catch (e) {
+					// swallow
+				}
+			});
+			context.subscriptions.push({ dispose: unsubSnapshot });
+			// Also check existing cached snapshot (if any) to decide immediate start
+			try {
+				const cached = (mcpClientModule as any).getLatestStatusSnapshot ? (mcpClientModule as any).getLatestStatusSnapshot() : undefined;
+				const cliState = cached && cached.cliStatus && cached.cliStatus.state ? String(cached.cliStatus.state) : undefined;
+				if (cliState === 'ok') {
+					void modelBridge.start();
+					logger.info('Gemini MCP: modelBridge started from existing snapshot');
+				}
+			} catch {}
+		} catch (e) {
+			// best-effort: if subscription fails, do not block activation
+		}
 
 	const initialConfig = readConfig();
-	const initialHealthCheck = cliHealth.refresh(initialConfig);
 
 	// Track how often the provider is asked to provide definitions (helpful for diagnostics)
 	let providerTriggerCount = 0;
@@ -329,12 +333,7 @@ export function activate(context: vscode.ExtensionContext) {
 		providerTriggerCount += 1;
 		logger.info(`Gemini MCP: providerEmitter fired (${providerTriggerCount} times)`);
 	});
-	// NOTE: do not fire providerEmitter directly from cliHealth.onDidChange.
-	// Firing the provider on every health change causes a feedback loop:
-	// cliHealth.onDidChange -> providerEmitter.fire -> provideMcpServerDefinitions -> cliHealth.refresh
-	// which leads to repeated refreshes and toggling of the health state.
-	// The `TaskStatusMonitor` already receives `cliHealth` and will update UI; keep health-change
-	// handling scoped to UI/diagnostics only.
+	// NOTE: providerEmitter should not be fired in tight loops; keep change handling scoped to UI/diagnostics.
 	const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(() => {
 		providerEmitter.fire();
 	});
@@ -344,9 +343,8 @@ export function activate(context: vscode.ExtensionContext) {
 		onDidChangeMcpServerDefinitions: providerEmitter.event,
 		provideMcpServerDefinitions: async () => {
 			logger.info(`Gemini MCP: provideMcpServerDefinitions called (#${providerTriggerCount + 1})`);
-			await initialHealthCheck.catch(() => {});
 			const cfg = readConfig();
-				return buildMcpDefinitions(context, cfg, cliHealth, initialHealthCheck, providerTriggerCount);
+			return buildMcpDefinitions(context, cfg, providerTriggerCount);
 		},
 		resolveMcpServerDefinition: async (server: any) => server
 	};
@@ -397,8 +395,6 @@ export function activate(context: vscode.ExtensionContext) {
 			providerEmitter.fire();
 			const cfg = readConfig();
 			statusMonitor.updateConfig(cfg);
-			// 當設定變更時也刷新 CLI Health，確保狀態與 config 同步
-			void cliHealth.refresh(cfg).catch(() => {});
 			void vscode.window
 				.showWarningMessage(
 					'Gemini CLI MCP settings changed. Reload VS Code to re-validate the Gemini CLI state.',
@@ -416,24 +412,49 @@ export function activate(context: vscode.ExtensionContext) {
 	// 發起一次 provider 更新以確保 provider 在 activation 後能被測試/載入
 	providerEmitter.fire();
 
-	const showStatusCmd = vscode.commands.registerCommand('geminiMcp.showStatus', async () => {
-		await initialHealthCheck.catch(() => {});
-		const cfg = readConfig();
-		statusMonitor.updateConfig(cfg);
-		const cliStatus = cliHealth.getStatus();
-		const cliLabel =
-			cliStatus.state === 'ok'
-				? `OK (${cliStatus.message})`
-				: `${cliStatus.state.toUpperCase()} (${cliStatus.message})`;
-		vscode.window.showInformationMessage(
-			`Gemini CLI MCP workers: ${cfg.maxWorkers}, CLI: ${cliLabel}`
-		);
-	});
+	// Best-effort: start an embedded MCP client so the bundled server is
+	// actually spawned when the extension activates. Some hosts start MCP
+	// servers themselves when the provider is registered; others defer
+	// until a consumer connects. Explicitly calling `getMcpClient` ensures
+	// the child server process is launched and that extension-side logging
+	// will capture its stdout/stderr. This is non-blocking and will not
+	// prevent activation if it fails.
+	setTimeout(() => {
+		(async () => {
+			try {
+				const cfg = readConfig();
+				logger.info('Gemini MCP: initiating embedded server via getMcpClient');
+				await mcpClientModule.getMcpClient(cfg);
+				logger.info('Gemini MCP: getMcpClient resolved (server spawn attempted)');
+			} catch (err) {
+				logger.warn('Gemini MCP: getMcpClient failed to start server', String(err));
+			}
+		})();
+	}, 500);
+
+	    const showStatusCmd = vscode.commands.registerCommand('geminiMcp.showStatus', async () => {
+		    const cfg = readConfig();
+			statusMonitor.updateConfig(cfg);
+			// Prefer server-provided snapshot for status. If no snapshot available,
+			// show a waiting message. This enforces server as authoritative source
+			// for CLI/worker information in the UI.
+			try {
+				const snapshot = (mcpClientModule as any).getLatestStatusSnapshot ? (mcpClientModule as any).getLatestStatusSnapshot() : undefined;
+				if (snapshot && snapshot.cliStatus && snapshot.cliStatus.state) {
+					const cliState = snapshot.cliStatus.state;
+					const cliMsg = snapshot.cliStatus.message ?? '';
+					vscode.window.showInformationMessage(`Gemini CLI MCP workers: ${snapshot.maxWorkers ?? cfg.maxWorkers}, CLI: ${cliState} ${cliMsg}`);
+				} else {
+					vscode.window.showInformationMessage('Gemini CLI MCP: waiting for server snapshot (status unknown)');
+				}
+			} catch (e) {
+				vscode.window.showInformationMessage('Gemini CLI MCP: status unavailable');
+			}
+		});
 	context.subscriptions.push(showStatusCmd);
 
 	// Diagnose command: prints config and verifies resolved paths and files
 	const diagnoseCmd = vscode.commands.registerCommand('geminiMcp.diagnose', async () => {
-		await initialHealthCheck.catch(() => {});
 		const cfg = readConfig();
 		statusMonitor.updateConfig(cfg);
 		const resolvedTaskCwd = resolveTaskCwd(cfg.taskCwd) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
@@ -445,7 +466,17 @@ export function activate(context: vscode.ExtensionContext) {
 		logger.info(`resolvedTaskCwd: ${resolvedTaskCwd}`);
 		logger.info(`serverEntry: ${serverEntry}`);
 		logger.info(`serverEntry exists: ${exists}`);
-		logger.info(`cliHealth: ${JSON.stringify(cliHealth.getStatus())}`);
+		try {
+			const snapshot = (mcpClientModule as any).getLatestStatusSnapshot ? (mcpClientModule as any).getLatestStatusSnapshot() : undefined;
+			if (snapshot) {
+				logger.info(`server snapshot: ${JSON.stringify(snapshot).slice(0,2000)}`);
+			} else {
+				logger.info('server snapshot: <none - waiting for server>');
+			}
+		} catch (e) {
+			logger.warn('diagnose: failed to read snapshot', String(e));
+		}
+		// Local CLI health checks removed; rely on server snapshot for runtime status.
 		vscode.window.showInformationMessage('Gemini MCP: diagnosis written to Output -> "Gemini CLI MCP"');
 	});
 	context.subscriptions.push(diagnoseCmd);
@@ -507,6 +538,13 @@ export function activate(context: vscode.ExtensionContext) {
 	statusMonitor.updateConfig(initialConfig);
 }
 
-export function deactivate() {
-	// Nothing to dispose; VS Code handles MCP server lifecycle
+export async function deactivate() {
+	// Attempt to close any MCP client we started so the child server
+	// process is cleanly shut down. This is best-effort and will not
+	// throw if the client was never created or already closed.
+	try {
+		await mcpClientModule.closeMcpClient();
+	} catch {
+		// ignore
+	}
 }
