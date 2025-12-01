@@ -1,8 +1,5 @@
 import process from 'node:process';
-import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -58,37 +55,47 @@ async function main() {
 
   const results = [];
 
-  // 1) Basic version check
-  results.push(await runCommandTask(client, geminiConfig, ['--version']));
+  results.push({
+    name: 'manifest.toolsPresent',
+    ok: toolList.tools.length > 0,
+    payload: toolList.tools.map((tool) => tool.name)
+  });
 
-  // 2) 快速帮助输出（避免长时间联网）
-  results.push(await runCommandTask(client, geminiConfig, ['--help'], 10_000));
+  const snippet = 'function add(a, b) { return a + b; }';
+  const explainRes = await callTool(client, 'dev.explainSnippet', {
+    content: snippet,
+    language: 'javascript'
+  });
+  const explainOk = explainRes && typeof explainRes === 'object' && !('error' in explainRes);
+  results.push({
+    name: 'dev.explainSnippet',
+    ok: !!explainOk,
+    payload: explainRes
+  });
 
-  // 3) 文件写读验证
-  const tmpFile = path.join('scripts', '.mcp-smoke.tmp');
-  await fs.writeFile(tmpFile, 'hello-mcp', 'utf8');
-  const writeRes = await callTool(client, 'fs.write', { file: tmpFile, contents: 'hello-mcp-updated' });
-  results.push({ name: 'fs.write', ok: !!writeRes?.ok, payload: writeRes });
-  const readRes = await callTool(client, 'fs.read', { file: tmpFile });
-  results.push({ name: 'fs.read', ok: typeof readRes === 'string' && readRes.includes('hello-mcp-updated'), payload: readRes });
-  await fs.unlink(tmpFile).catch(() => {});
+  const translateRes = await callTool(client, 'dev.translateCode', {
+    content: snippet,
+    targetLanguage: 'python',
+    notes: false
+  });
+  const translateOk = translateRes && typeof translateRes === 'object' && !('error' in translateRes);
+  results.push({
+    name: 'dev.translateCode',
+    ok: !!translateOk,
+    payload: translateRes
+  });
 
-  // 4) Task listing and suggestion check
-  const listRes = await callTool(client, 'gemini.task.list', { limit: 5 });
-  results.push({ name: 'gemini.task.list', ok: !!listRes?.tasks, payload: listRes });
-  const suggestRes = await callTool(client, 'gemini.task.suggest', { limit: 3 });
-  results.push({ name: 'gemini.task.suggest', ok: !!suggestRes?.suggestions, payload: suggestRes });
-
-  // 5) Tail 已完成任务日志，确保资源可读
-  const lastTaskId = results.find((r) => r.name === 'command(--version)')?.taskId;
-  if (lastTaskId) {
-    const tailRes = await callTool(client, 'gemini.task.tail', { taskId: lastTaskId, offset: 0 });
-    results.push({
-      name: 'gemini.task.tail',
-      ok: !!tailRes && tailRes.status !== 'failed',
-      payload: tailRes
-    });
-  }
+  const commentsRes = await callTool(client, 'dev.generateComments', {
+    content: snippet,
+    language: 'javascript',
+    style: 'brief'
+  });
+  const commentsOk = commentsRes && typeof commentsRes === 'object' && !('error' in commentsRes);
+  results.push({
+    name: 'dev.generateComments',
+    ok: !!commentsOk,
+    payload: commentsRes
+  });
 
   await client.close();
 
@@ -106,53 +113,6 @@ async function main() {
   }
 }
 
-async function runCommandTask(client, geminiConfig, args, timeoutMs = 30_000) {
-  const submitResult = await client.callTool({
-    name: 'gemini.task.submit',
-    arguments: {
-      command: [...geminiConfig.preArgs, ...args],
-      timeoutMs
-    }
-  });
-  const submitPayload = safeParseContent(submitResult);
-  if (!submitPayload?.taskId) {
-    throw new Error(`gemini.task.submit did not return a taskId: ${JSON.stringify(submitPayload)}`);
-  }
-
-  const taskId = submitPayload.taskId;
-  const final = await waitForTaskCompletion(client, taskId, submitPayload.nextOffset ?? 0);
-  return { name: `command(${args.join(' ')})`, ok: final.status === 'succeeded', taskId, payload: final };
-}
-
-async function waitForTaskCompletion(client, taskId, startOffset = 0) {
-  let offset = startOffset;
-  let status = 'unknown';
-  let lastChunk = '';
-  while (true) {
-    const tailResult = await client.callTool({
-      name: 'gemini.task.tail',
-      arguments: { taskId, offset }
-    });
-    const tailPayload = safeParseContent(tailResult);
-    if (!tailPayload) {
-      throw new Error('gemini.task.tail returned invalid payload');
-    }
-
-    if (tailPayload.chunk) {
-      lastChunk = tailPayload.chunk;
-      process.stdout.write(tailPayload.chunk);
-    }
-
-    offset = tailPayload.nextOffset ?? offset;
-    status = tailPayload.status ?? status;
-
-    if (tailPayload.done) {
-      return { ...tailPayload, status, lastChunk };
-    }
-    await delay(250);
-  }
-}
-
 async function callTool(client, name, args) {
   const res = await client.callTool({ name, arguments: args });
   return safeParseContent(res);
@@ -166,7 +126,7 @@ function safeParseContent(result) {
   try {
     return JSON.parse(first.text);
   } catch (error) {
-    // 对纯文本工具（如 fs.read）直接返回原始字符串
+    // Return raw text when the tool response is not valid JSON
     return first.text;
   }
 }

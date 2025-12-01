@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { spawn, ChildProcess, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -12,7 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WorkerPool } from '../task/workerPool.js';
 import { terminateProcessTree, execGeminiCommand } from '../gemini/processUtils.js';
 import { buildSpawnCommand, setGeminiBin, geminiBin } from '../gemini/spawnHelpers.js';
-import { SILENT_EXEC_PROMPT, StructuredError, serializeErrorForClient, tokenizeCommandLine, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv, readPriorityEnv } from '../core/utils.js';
+import { SILENT_EXEC_PROMPT, serializeErrorForClient, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv } from '../core/utils.js';
 import { createPersistenceManager } from '../task/persistenceManager.js';
 export { buildSpawnCommand, setGeminiBin } from '../gemini/spawnHelpers.js';
 import { TaskRecord, TaskStatus } from '../task/types.js';
@@ -37,7 +36,6 @@ const lockFile = path.join(stateDir, 'server.lock');
 let lockHeld = false;
 const maxQueueSize = Math.max(1, Number(process.env.GEMINI_MAX_QUEUE || '200'));
 const retentionMs = 7 * 24 * 60 * 60 * 1000;
-const suggestSampleLimit = 200;
 const workspaceRootFingerprint = normalizeForComparison(workspaceRoot);
 const workspaceRootPrefix = workspaceRootFingerprint.endsWith(path.sep)
     ? workspaceRootFingerprint
@@ -64,18 +62,7 @@ let cliStatus: CliStatusSnapshot = {
 let cliCheckPromise: Promise<void> | undefined;
 let acceptingTasks = false;
 const allowedCwdRoots = [workspaceRoot, os.tmpdir(), os.homedir()].map((p) => path.normalize(p));
-const defaultTimeouts: Record<string, number> = {
-    'tests.run': readTimeoutEnv('GEMINI_TIMEOUT_TESTS_RUN', 10 * 60 * 1000),
-    'code.analyze': readTimeoutEnv('GEMINI_TIMEOUT_CODE_ANALYZE', 5 * 60 * 1000),
-    'code.format.batch': readTimeoutEnv('GEMINI_TIMEOUT_CODE_FORMAT', 5 * 60 * 1000),
-    'gemini.task.submit': readTimeoutEnv('GEMINI_TIMEOUT_TASK_SUBMIT', 0)
-};
-const defaultPriorities: Record<string, number> = {
-    'tests.run': readPriorityEnv('GEMINI_PRIORITY_TESTS_RUN', 0),
-    'code.analyze': readPriorityEnv('GEMINI_PRIORITY_CODE_ANALYZE', 0),
-    'code.format.batch': readPriorityEnv('GEMINI_PRIORITY_CODE_FORMAT', 0),
-    'gemini.task.submit': readPriorityEnv('GEMINI_PRIORITY_TASK_SUBMIT', 0)
-};
+const manifestToolTimeoutMs = readTimeoutEnv('GEMINI_TIMEOUT_MANIFEST', 120000);
 
 const tasks = new Map<string, TaskRecord>();
 const taskEvents = new EventEmitter();
@@ -123,57 +110,28 @@ const server = new McpServer({
     version: '0.2.0'
 });
 
-const nonNegativeTimeout = z.number().int().nonnegative().optional();
-
-const taskSchema = z.object({
-    command: z.array(z.string()).nonempty(),
-    stdin: z.string().optional(),
-    cwd: z.string().optional(),
-    timeoutMs: nonNegativeTimeout,
-    priority: z.number().int().min(-5).max(5).optional()
-});
-
-const analyzeSchema = z.object({
-    paths: z.array(z.string()).nonempty(),
-    prompt: z.string().optional(),
-    subcommand: z.string().default('code'),
-    cwd: z.string().optional(),
-    timeoutMs: nonNegativeTimeout,
-    priority: z.number().int().min(-5).max(5).optional()
-});
-
-const testSchema = z.object({
-    command: z.string().default('npm'),
-    args: z.array(z.string()).default(['test']),
-    cwd: z.string().optional(),
-    timeoutMs: nonNegativeTimeout,
-    priority: z.number().int().min(-5).max(5).optional()
-});
-
-const formatSchema = z.object({
-    files: z.array(z.string()).nonempty(),
-    formatter: z.string().default('code edit'),
-    extraArgs: z.array(z.string()).optional(),
-    cwd: z.string().optional(),
-    timeoutMs: nonNegativeTimeout,
-    priority: z.number().int().min(-5).max(5).optional()
-});
-
-const fileReadSchema = z.object({ file: z.string() });
-const fileWriteSchema = z.object({ file: z.string(), contents: z.string() });
-const tailLogSchema = z.object({
-    taskId: z.string(),
-    offset: z.number().int().nonnegative().default(0)
-});
-const listTasksSchema = z.object({
-    limit: z.number().int().positive().max(200).default(50)
-});
-const pruneSchema = z.object({
-    olderThanDays: z.number().int().positive().max(365).default(7)
-});
-const suggestSchema = z.object({
-    limit: z.number().int().positive().max(10).default(5)
-});
+const manifestSchema = z
+    .object({
+        version: z.string().optional(),
+        name: z.string().optional(),
+        description: z.string().optional(),
+        tools: z
+            .array(
+                z
+                    .object({
+                        name: z.string().trim().min(1, 'Tool name is required'),
+                        title: z.string().optional(),
+                        description: z.string().optional(),
+                        arguments: z.unknown().optional(),
+                        returns: z.unknown().optional(),
+                        metadata: z.record(z.unknown()).optional()
+                    })
+                    .passthrough()
+            )
+            .optional(),
+        resources: z.array(z.unknown()).optional()
+    })
+    .passthrough();
 
 const logTemplate = new ResourceTemplate('tasks://{id}/log', {
     list: async () => ({
@@ -264,497 +222,9 @@ server.registerResource(
     }
 );
 
-server.registerTool(
-    'gemini.task.submit',
-    {
-        title: 'Submit Gemini CLI command',
-        description: 'Delegate any Gemini CLI subcommand to a worker.',
-        inputSchema: taskSchema
-    },
-    async (input, _extra) => {
-        try {
-            ensureCliReady();
-            const { command, stdin, cwd, timeoutMs, priority } = input;
-            const effectiveTimeout = timeoutMs ?? defaultTimeouts['gemini.task.submit'] ?? undefined;
-            const resolvedPriority = priority ?? defaultPriorities['gemini.task.submit'];
-            ensureQueueCapacity();
-            const task = await createTask(
-                'gemini.task.submit',
-                input,
-                command,
-                stdin,
-                cwd,
-                effectiveTimeout,
-                resolvedPriority
-            );
-            return textResponse(taskResponse(task.id, task.status, task.logLength));
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'gemini.task.status',
-    {
-        title: 'Check Gemini task status',
-        description: 'Return the persisted task payload and timestamps.',
-        inputSchema: z.object({ taskId: z.string() })
-    },
-    async ({ taskId }, _extra) => {
-        const task = tasks.get(taskId);
-        if (!task) {
-            return textResponse({ error: 'Task not found' });
-        }
-        await updateLogLength(task);
-        return textResponse({ ...task, logUri: `tasks://${task.id}/log`, nextOffset: task.logLength });
-    }
-);
-
-server.registerTool(
-    'gemini.task.list',
-    {
-        title: 'List Gemini tasks',
-        description: 'Enumerate recent Gemini tasks with status and log pointers.',
-        inputSchema: listTasksSchema
-    },
-    async ({ limit }, _extra) => {
-        const maxItems = limit ?? 50;
-        const items = Array.from(tasks.values())
-            .sort((a, b) => b.createdAt - a.createdAt)
-            .slice(0, maxItems)
-            .map((task) => ({
-                id: task.id,
-                toolName: task.toolName,
-                status: task.status,
-                createdAt: task.createdAt,
-                updatedAt: task.updatedAt,
-                exitCode: task.exitCode,
-                timeoutMs: task.timeoutMs,
-                logUri: `tasks://${task.id}/log`,
-                cwd: task.cwd
-            }));
-        return textResponse({ tasks: items });
-    }
-);
-
-server.registerTool(
-    'gemini.task.prune',
-    {
-        title: 'Prune old Gemini tasks',
-        description: 'Delete completed tasks and logs older than the given number of days.',
-        inputSchema: pruneSchema
-    },
-    async ({ olderThanDays = 7 }, _extra) => {
-        const windowMs = olderThanDays * 24 * 60 * 60 * 1000;
-        const result = await persistence.pruneOldTasks(windowMs);
-        return textResponse({
-            prunedTasks: result.removedTasks,
-            prunedLogs: result.removedLogs,
-            cutoff: result.cutoff
-        });
-    }
-);
-
-server.registerTool(
-    'gemini.task.cancel',
-    {
-        title: 'Cancel Gemini task',
-        description: 'Abort a queued or running worker job.',
-        inputSchema: z.object({ taskId: z.string() })
-    },
-    async ({ taskId }, _extra) => {
-        const task = tasks.get(taskId);
-        if (!task) {
-            return textResponse({ error: 'Task not found' });
-        }
-        if (completedStatuses.includes(task.status)) {
-            return textResponse({
-                ...taskResponse(task.id, task.status, task.logLength),
-                note: 'Task already completed.'
-            });
-        }
-        if (task.jobId) {
-            pool.cancel(task.jobId);
-        }
-        task.jobId = undefined;
-        appendLog(task, '\nCanceled by user.');
-        markTaskStatus(task, 'canceled');
-        return textResponse(taskResponse(task.id, task.status, task.logLength));
-    }
-);
-
-server.registerTool(
-    'gemini.task.tail',
-    {
-        title: 'Stream Gemini task log',
-        description: 'Incrementally read task output using an offset cursor.',
-        inputSchema: tailLogSchema
-    },
-    async ({ taskId, offset }, _extra) => {
-        const task = tasks.get(taskId);
-        if (!task) {
-            return textResponse({ error: 'Task not found' });
-        }
-        const { chunk, nextOffset, size } = await readLogChunk(task, offset ?? 0);
-        return textResponse({
-            chunk,
-            nextOffset,
-            status: task.status,
-            done: completedStatuses.includes(task.status) && nextOffset >= size,
-            logUri: `tasks://${task.id}/log`
-        });
-    }
-);
-
-server.registerTool(
-    'fs.read',
-    {
-        title: 'Read UTF-8 file',
-        description: 'Quick read helper flagged as readOnly.',
-        inputSchema: fileReadSchema
-    },
-    async ({ file }, _extra) => {
-        try {
-            const target = resolveWorkspacePath(file);
-            const data = await fs.readFile(target, 'utf8');
-            return textResponse(data);
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'fs.write',
-    {
-        title: 'Write UTF-8 file',
-        description: 'Persist contents to disk using Gemini worker context.',
-        inputSchema: fileWriteSchema
-    },
-    async ({ file, contents }, _extra) => {
-        try {
-            const target = resolveWorkspacePath(file);
-            await fs.mkdir(path.dirname(target), { recursive: true });
-            await fs.writeFile(target, contents, 'utf8');
-            return textResponse({ ok: true, file });
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'code.analyze',
-    {
-        title: 'Analyze multiple files with Gemini',
-        description: 'Package files plus instructions into Gemini CLI.',
-        inputSchema: analyzeSchema
-    },
-    async ({ paths, prompt, subcommand, cwd, timeoutMs, priority }, _extra) => {
-        try {
-            ensureCliReady();
-            const parts = [`# Instruction\n${prompt ?? 'Analyze the provided files.'}\n`, '# Files'];
-            for (const rel of paths) {
-                try {
-                    const abs = resolveWorkspacePath(rel);
-                    if (!(await fileExists(abs))) {
-                        parts.push(`\n--- FILE: ${rel} (missing) ---`);
-                        continue;
-                    }
-                    const content = await fs.readFile(abs, 'utf8');
-                    parts.push(`\n--- FILE: ${rel} ---\n${content}`);
-                } catch (error) {
-                    parts.push(`\n--- FILE: ${rel} (unreadable) ---\n${formatWorkspaceError(error)}`);
-                }
-            }
-            const resolvedSubcommand = subcommand ?? 'code';
-            const command = tokenizeCommandLine(resolvedSubcommand);
-            if (command.length === 0) {
-                throw new Error('Gemini code.analyze subcommand cannot be empty.');
-            }
-            const effectiveTimeout =
-                timeoutMs ?? defaultTimeouts['code.analyze'] ?? undefined;
-            const resolvedPriority = priority ?? defaultPriorities['code.analyze'];
-            ensureQueueCapacity();
-            const task = await createTask(
-                'code.analyze',
-                { paths, prompt, subcommand, timeoutMs: effectiveTimeout, priority: resolvedPriority },
-                command,
-                parts.join('\n'),
-                cwd,
-                effectiveTimeout,
-                resolvedPriority
-            );
-            return textResponse(taskResponse(task.id, task.status, task.logLength));
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'tests.run',
-    {
-        title: 'Run repo tests/lints via Gemini CLI',
-        description: 'Hand off noisy CI chores to Gemini workers.',
-        inputSchema: testSchema
-    },
-    async ({ command, args, cwd, timeoutMs, priority }, _extra) => {
-        try {
-            ensureCliReady();
-            const resolvedCommand = command ?? 'npm';
-            const resolvedArgs = args ?? ['test'];
-            const effectiveTimeout =
-                timeoutMs ?? defaultTimeouts['tests.run'] ?? undefined;
-            const resolvedPriority = priority ?? defaultPriorities['tests.run'];
-            ensureQueueCapacity();
-            const task = await createTask(
-                'tests.run',
-                {
-                    command: resolvedCommand,
-                    args: resolvedArgs,
-                    timeoutMs: effectiveTimeout,
-                    priority: resolvedPriority
-                },
-                [resolvedCommand, ...resolvedArgs],
-                undefined,
-                cwd,
-                effectiveTimeout,
-                resolvedPriority
-            );
-            return textResponse(taskResponse(task.id, task.status, task.logLength));
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'code.format.batch',
-    {
-        title: 'Batch format or refactor files',
-        description: 'Send snippets to Gemini for repetitive formatting or documentation edits.',
-        inputSchema: formatSchema
-    },
-    async ({ files, formatter, extraArgs, cwd, timeoutMs, priority }, _extra) => {
-        try {
-            ensureCliReady();
-            const resolvedFormatter = formatter ?? 'code edit';
-            const buffer: string[] = [`Apply ${resolvedFormatter} to the following files.`];
-            for (const rel of files) {
-                try {
-                    const abs = resolveWorkspacePath(rel);
-                    if (!(await fileExists(abs))) {
-                        buffer.push(`\n--- FILE: ${rel} (missing) ---`);
-                        continue;
-                    }
-                    const content = await fs.readFile(abs, 'utf8');
-                    buffer.push(`\n--- FILE: ${rel} ---\n${content}`);
-                } catch (error) {
-                    buffer.push(`\n--- FILE: ${rel} (unreadable) ---\n${formatWorkspaceError(error)}`);
-                }
-            }
-            const formatterTokens = tokenizeCommandLine(resolvedFormatter);
-            if (formatterTokens.length === 0) {
-                throw new Error('code.format.batch formatter command cannot be empty.');
-            }
-            const command = [...formatterTokens, ...(extraArgs ?? [])];
-            const effectiveTimeout =
-                timeoutMs ?? defaultTimeouts['code.format.batch'] ?? undefined;
-            const resolvedPriority = priority ?? defaultPriorities['code.format.batch'];
-            ensureQueueCapacity();
-            const task = await createTask(
-                'code.format.batch',
-                {
-                    files,
-                    formatter: resolvedFormatter,
-                    timeoutMs: effectiveTimeout,
-                    priority: resolvedPriority
-                },
-                command,
-                buffer.join('\n'),
-                cwd,
-                effectiveTimeout,
-                resolvedPriority
-            );
-            return textResponse(taskResponse(task.id, task.status, task.logLength));
-        } catch (error) {
-            return textResponse({ error: serializeErrorForClient(error) });
-        }
-    }
-);
-
-server.registerTool(
-    'gemini.task.suggest',
-    {
-        title: 'Suggest delegable Gemini tasks',
-        description: 'Heuristically suggest background tasks suitable for workers.',
-        inputSchema: suggestSchema
-    },
-    async ({ limit }, _extra) => {
-        const suggestions = await buildSuggestions(limit ?? 5);
-        return textResponse({ suggestions });
-    }
-);
-
-async function createTask(
-    toolName: string,
-    args: Record<string, unknown>,
-    command: string[],
-    stdinText?: string,
-    cwd?: string,
-    timeoutMs?: number,
-    priority = 0
-) {
-    const taskCwd = resolveTaskCwd(cwd);
-    const id = randomUUID();
-    await ensureStateDirs();
-    const logFile = path.join(logDir, `${id}.log`);
-    await fs.writeFile(logFile, '', 'utf8');
-    const now = Date.now();
-    const task: TaskRecord = {
-        id,
-        toolName,
-        args,
-        cmd: command,
-        cwd: taskCwd,
-        status: 'queued',
-        createdAt: now,
-        updatedAt: now,
-        logLength: 0,
-        logFile,
-        timeoutMs,
-        priority
-    };
-    tasks.set(id, task);
-    taskEvents.emit('update', task);
-    persistence.schedulePersist();
-    // Inject a short instruction prompting the agent to run silently and
-    // avoid spawning new terminal windows. This is a lightweight mitigation
-    // that asks Gemini to keep subsequent calls non-interactive; it cannot
-    // fully guarantee behavior but reduces accidental external windows.
-    const injectedStdin = stdinText ? `${SILENT_EXEC_PROMPT}\n${stdinText}` : `${SILENT_EXEC_PROMPT}\n`;
-    enqueueCliTask(task, injectedStdin);
-    return task;
-}
-
-function enqueueCliTask(task: TaskRecord, stdinText?: string) {
-    const jobId = pool.enqueue(async (signal) => {
-        const finalize = async (status: TaskStatus, error?: string) => {
-            task.jobId = undefined;
-            markTaskStatus(task, status, error);
-            if (completedStatuses.includes(status)) {
-                try {
-                    // Wait a tick to allow the WorkerPool to decrement its running
-                    // count (which happens in the pool pump's finally) before
-                    // persisting the live status. This avoids a race where the
-                    // status file is written while the pool still reports the
-                    // task as running.
-                    await new Promise((resolve) => setImmediate(resolve));
-                    await persistence.flushPendingPersistence();
-                } catch (err) {
-                    // best-effort
-                }
-            }
-        };
-        if (signal.aborted) {
-            appendLog(task, '\nAborted before start.');
-            await finalize('canceled');
-            return;
-        }
-        appendLog(task, `Working directory: ${task.cwd ?? workspaceRoot}\n`);
-        markTaskStatus(task, 'running');
-        task.startedAt = task.startedAt ?? Date.now();
-        let canceledDuringRun = false;
-        const stderrBuffer: string[] = [];
-        const { command, args } = buildSpawnCommand(task.cmd);
-        const child = spawn(command, args, {
-            cwd: task.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            // Keep child in the same process group where possible so termination
-            // of the parent/child tree is more reliable across platforms.
-            detached: false,
-            windowsHide: process.platform === 'win32'
-        });
-
-        const timeoutTimer = task.timeoutMs
-            ? setTimeout(() => {
-                  canceledDuringRun = true;
-                  appendLog(task, `\nTimed out after ${task.timeoutMs}ms, terminating.`);
-                  terminateProcessTree(child);
-              }, task.timeoutMs)
-            : undefined;
-
-        signal.addEventListener('abort', () => {
-            canceledDuringRun = true;
-            appendLog(task, '\nCancellation requested.');
-            terminateProcessTree(child);
-        });
-
-        if (stdinText) {
-            child.stdin.write(stdinText);
-            child.stdin.end();
-        }
-
-        child.stdout.on('data', (chunk: Buffer) => {
-            appendLog(task, chunk.toString());
-        });
-        child.stderr.on('data', (chunk: Buffer) => {
-            const text = chunk.toString();
-            stderrBuffer.push(text);
-            appendLog(task, text);
-        });
-
-        let exitCode: number | null;
-            try {
-                exitCode = await new Promise<number | null>((resolve, reject) => {
-                    child.on('error', reject);
-                    child.on('close', (code) => resolve(code));
-                });
-            } catch (error) {
-                const message = formatWorkspaceError(error);
-                appendLog(task, `\n${message}`);
-                await finalize('failed', message);
-                maybeUpdateCliStatusFromFailure(message);
-                if (timeoutTimer) {
-                    clearTimeout(timeoutTimer);
-                }
-                return;
-            }
-
-        if (timeoutTimer) {
-            clearTimeout(timeoutTimer);
-        }
-
-        task.exitCode = exitCode ?? undefined;
-        if (canceledDuringRun) {
-            await finalize('canceled');
-            return;
-        }
-        if (exitCode === 0) {
-            await finalize('succeeded');
-        } else {
-            const stderrText = stderrBuffer.join('').trim() || `Gemini exited with code ${exitCode ?? -1}`;
-            maybeUpdateCliStatusFromFailure(stderrText);
-            await finalize('failed', stderrText);
-        }
-    });
-    task.jobId = jobId;
-}
-
 function textResponse(payload: unknown) {
     const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
     return { content: [{ type: 'text' as const, text }] };
-}
-
-function taskResponse(taskId: string, status: string, nextOffset = 0) {
-    return {
-        taskId,
-        status,
-        logUri: `tasks://${taskId}/log`,
-        nextOffset
-    };
 }
 
 function readResourceText(text: string, taskId?: string) {
@@ -781,12 +251,6 @@ function normalizeTemplateVariable(value?: string | string[]) {
 }
 
 // `tokenizeCommandLine` moved to `server/src/core/utils.ts`
-
-function ensureQueueCapacity() {
-    if (pool.queuedCount() >= maxQueueSize) {
-        throw new StructuredError('QUEUE_FULL', `Queue is full (limit ${maxQueueSize}). Try again later.`);
-    }
-}
 
 async function fileExists(target: string) {
     try {
@@ -1057,130 +521,6 @@ function registerShutdownHandlers() {
     });
 }
 
-async function readPackageJson() {
-    const pkgPath = path.join(workspaceRoot, 'package.json');
-    if (!(await fileExists(pkgPath))) {
-        return undefined;
-    }
-    try {
-        const raw = await fs.readFile(pkgPath, 'utf8');
-        return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-        return undefined;
-    }
-}
-
-async function countWorkspaceFiles(limit = suggestSampleLimit) {
-    let count = 0;
-    const queue: string[] = [workspaceRoot];
-    while (queue.length > 0 && count < limit) {
-        const current = queue.pop();
-        if (!current) {
-            break;
-        }
-        try {
-            const entries = await fs.readdir(current, { withFileTypes: true });
-            for (const entry of entries) {
-                const full = path.join(current, entry.name);
-                if (entry.isDirectory()) {
-                    // skip hidden/system directories
-                    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') {
-                        continue;
-                    }
-                    queue.push(full);
-                } else {
-                    count += 1;
-                    if (count >= limit) {
-                        break;
-                    }
-                }
-            }
-        } catch {
-            // ignore traversal errors
-        }
-    }
-    return count;
-}
-
-async function buildSuggestions(limit: number) {
-    const suggestions: Array<Record<string, unknown>> = [];
-    const pkg = await readPackageJson();
-    const scripts = (pkg?.scripts as Record<string, string> | undefined) ?? {};
-
-    if (scripts.test && suggestions.length < limit) {
-        suggestions.push({
-            title: 'Run test suite',
-            tool: 'tests.run',
-            args: {
-                command: 'npm',
-                args: ['test'],
-                timeoutMs: defaultTimeouts['tests.run'],
-                priority: defaultPriorities['tests.run']
-            },
-            reason: 'package.json defines a test script; offload CI-style checks to a worker.',
-            priority: defaultPriorities['tests.run']
-        });
-    }
-
-    if (scripts.lint && suggestions.length < limit) {
-        suggestions.push({
-            title: 'Run lint',
-            tool: 'tests.run',
-            args: {
-                command: 'npm',
-                args: ['run', 'lint'],
-                timeoutMs: defaultTimeouts['tests.run'],
-                priority: defaultPriorities['tests.run']
-            },
-            reason: 'Lint script detected; useful for static checks while coding continues.',
-            priority: defaultPriorities['tests.run']
-        });
-    }
-
-    if (scripts.format && suggestions.length < limit) {
-        suggestions.push({
-            title: 'Run formatter',
-            tool: 'tests.run',
-            args: {
-                command: 'npm',
-                args: ['run', 'format'],
-                timeoutMs: defaultTimeouts['code.format.batch'],
-                priority: defaultPriorities['code.format.batch']
-            },
-            reason: 'Format script detected; can tidy files in background.',
-            priority: defaultPriorities['code.format.batch']
-        });
-    }
-
-    const fileSampleCount = await countWorkspaceFiles();
-    if (fileSampleCount >= 100 && suggestions.length < limit) {
-        suggestions.push({
-            title: 'Summarize codebase hotspots',
-            tool: 'code.analyze',
-            args: {
-                paths: ['src'],
-                prompt: 'Summarize major modules and surface TODO/FIXME clusters.',
-                timeoutMs: defaultTimeouts['code.analyze'],
-                priority: defaultPriorities['code.analyze']
-            },
-            reason: 'Large workspace detected; a quick summary helps navigation.',
-            priority: defaultPriorities['code.analyze']
-        });
-    }
-
-    if (suggestions.length === 0) {
-        suggestions.push({
-            title: 'Basic status check',
-            tool: 'gemini.task.list',
-            args: { limit: 20 },
-            reason: 'No obvious automation hooks detected; list tasks to decide next actions.',
-            priority: 0
-        });
-    }
-
-    return suggestions.slice(0, limit);
-}
-
 // `formatWorkspaceError` moved to `server/src/core/utils.ts`
 
 async function validateGeminiExecutable() {
@@ -1205,6 +545,7 @@ async function updateCliStatus(reason: string) {
     cliCheckPromise = (async () => {
         try {
             const v = buildSpawnCommand(['--version']);
+            console.log(`[cli] Checking Gemini CLI status (reason=${reason}) with command: ${v.command} ${v.args.join(' ')}`);
             const { stdout, stderr } = await execGeminiCommand(v.command, v.args);
             const versionLine =
                 stdout
@@ -1223,6 +564,7 @@ async function updateCliStatus(reason: string) {
                 lastChecked: Date.now()
             };
             acceptingTasks = true;
+            console.log(`[cli] Gemini CLI ready (${versionLine})`);
         } catch (error) {
             const message = formatWorkspaceError(error);
             const state = classifyCliFailure(message);
@@ -1230,6 +572,7 @@ async function updateCliStatus(reason: string) {
             // like 'missing' or 'quota_exhausted'. Generic 'error' should not
             // immediately force a global failure since it may be transient.
             const shouldForce = state !== 'error';
+            console.warn(`[cli] Failed to update Gemini CLI status (reason=${reason}, classified=${state}): ${message}`);
             enterCliFailure(state, `${message} [${reason}]`, { force: shouldForce });
         } finally {
             cliCheckPromise = undefined;
@@ -1270,6 +613,7 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
     if (state === 'unknown') {
         return;
     }
+    console.warn(`[cli] Entering failure state=${state}, force=${options?.force === true}, message=${message}`);
     // Do not be aggressive about cancelling running tasks for transient
     // failures. Only force-cancel when we have a high-confidence unusable
     // state (e.g., 'missing' or 'quota_exhausted') or when caller set force.
@@ -1328,6 +672,7 @@ function stopCliHealthWatcher() {
 // `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/core/utils.ts`
 
 async function start() {
+    console.log(`[server] Starting Gemini CLI MCP server (pid=${process.pid}, workspace=${workspaceRoot})`);
     await validateGeminiExecutable();
     await updateCliStatus('startup');
     // If we have a discovered absolute gemini binary and the workspace
@@ -1392,68 +737,353 @@ async function loadMcpManifest() {
         const manifestPath = path.join(workspaceRoot, 'mcp.json');
         if (!(await fileExists(manifestPath))) {
             // No manifest present; nothing to do
+            console.log(`[manifest] No manifest found at ${manifestPath}, skipping registration`);
             return;
         }
         const raw = await fs.readFile(manifestPath, 'utf8');
         const manifest = JSON.parse(raw) as any;
-        console.log(`Loaded MCP manifest with ${((manifest.tools && manifest.tools.length) || 0)} tools`);
+        const manifestValidation = manifestSchema.safeParse(manifest);
+        if (!manifestValidation.success) {
+            console.error('Manifest validation failed; proceeding with raw manifest. Issues:', manifestValidation.error.issues);
+        }
+        const manifestData = manifestValidation.success ? manifestValidation.data : manifest;
+        const toolEntries = Array.isArray(manifestData.tools) ? manifestData.tools : [];
+        console.log(`Loaded MCP manifest with ${toolEntries.length} tools`);
         // Attach manifest to server for inspection by clients if needed
         try {
-            (server as any)._mcpManifest = manifest;
+            (server as any)._mcpManifest = manifestData;
         } catch { /* ignore */ }
 
         const manifestDir = path.dirname(manifestPath);
         const externalCache: Record<string, any> = {};
-        for (const t of manifest.tools || []) {
-                try {
-                    // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
-                    const hasTool = (server as any).hasTool?.(t.name) ?? Boolean((server as any)._tools && (server as any)._tools[t.name]);
-                    if (hasTool) {
-                        // already registered by code; skip
-                        continue;
-                    }
-                    // Register a lightweight metadata-only handler for tools not implemented server-side yet.
-                    // Convert the manifest's JSON Schema to a zod schema when possible,
-                    // so clients/models receive a stricter inputSchema.
-                    let resolvedArgs: any = undefined;
-                    try {
-                        if (t.arguments) {
-                            resolvedArgs = await dereferenceSchema(t.arguments, manifest, manifestDir, externalCache);
-                        }
-                    } catch (refErr) {
-                        console.warn(`Failed to dereference schema for tool ${t.name}:`, refErr);
-                        resolvedArgs = t.arguments;
-                    }
-                    const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
-                    try {
-                        server.registerTool(
-                            t.name,
-                            {
-                                title: t.title ?? t.name,
-                                description: t.description ?? '',
-                                inputSchema: inputSchemaZod
-                            },
-                            async (_input, _extra) => {
-                                return textResponse({ error: 'Tool advertised in mcp.json but no server-side handler is implemented.' });
-                            }
-                        );
-                        console.log(`Advertised tool: ${t.name}`);
-                    } catch (regErr: any) {
-                        const msg = String((regErr && regErr.message) || regErr);
-                        if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
-                            // duplicate registration -- reduce noise and continue
-                            console.log(`Skipping advertisement for already-registered tool ${t.name}`);
-                        } else {
-                            console.warn(`Failed to advertise tool ${t.name}:`, regErr);
-                        }
-                    }
-                } catch (err) {
-                    console.warn(`Failed to advertise tool ${t.name}:`, err);
+        const advertisedTools: string[] = [];
+        for (const t of toolEntries) {
+            try {
+                if (!t || typeof t !== 'object') {
+                    console.warn('[manifest] Skipping entry with invalid structure:', t);
+                    continue;
                 }
+                if (typeof t.name !== 'string' || t.name.trim().length === 0) {
+                    console.warn('[manifest] Skipping entry without a valid name:', t);
+                    continue;
+                }
+                const toolName = t.name.trim();
+                // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
+                const hasTool = (server as any).hasTool?.(toolName) ?? Boolean((server as any)._tools && (server as any)._tools[toolName]);
+                if (hasTool) {
+                    // already registered by code; skip
+                    continue;
+                }
+
+                let resolvedArgs: any = undefined;
+                try {
+                    if (t.arguments) {
+                        resolvedArgs = await dereferenceSchema(t.arguments, manifestData, manifestDir, externalCache);
+                    }
+                } catch (refErr) {
+                    console.warn(`Failed to dereference schema for tool ${toolName}:`, refErr);
+                    resolvedArgs = t.arguments;
+                }
+                const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
+
+                try {
+                    server.registerTool(
+                        toolName,
+                        {
+                            title: t.title ?? toolName,
+                            description: t.description ?? '',
+                            inputSchema: inputSchemaZod
+                        },
+                        async (input, _extra) => {
+                            try {
+                                ensureCliReady();
+                                const normalized = sanitizeManifestArgs(toolName, input ?? {});
+                                const result = await invokeManifestTool(toolName, normalized);
+                                return textResponse(result);
+                            } catch (err) {
+                                return textResponse({ error: serializeErrorForClient(err) });
+                            }
+                        }
+                    );
+                    console.log(`[manifest] Registered tool: ${toolName}`);
+                    advertisedTools.push(toolName);
+                } catch (regErr: any) {
+                    const msg = String((regErr && regErr.message) || regErr);
+                    if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
+                        console.log(`[manifest] Skipped duplicate tool: ${toolName}`);
+                    } else {
+                        console.warn(`Failed to register manifest tool ${toolName}:`, regErr);
+                    }
+                }
+            } catch (err) {
+                const fallbackName = (t && typeof t === 'object' && 'name' in t) ? (t as any).name : '<unknown>';
+                console.warn(`Failed to register manifest tool ${fallbackName}:`, err);
+            }
+        }
+        if (advertisedTools.length > 0) {
+            console.log(`[manifest] Tools available: ${advertisedTools.join(', ')}`);
+        } else {
+            console.warn('[manifest] No tools registered from manifest.');
         }
     } catch (err) {
         console.error('Failed to load mcp.json manifest:', err);
     }
+}
+
+type ManifestInvocationAttempt = {
+    label: string;
+    args: string[];
+    stdin?: string;
+    timeoutMs?: number;
+};
+
+function sanitizeManifestArgs(toolName: string, rawInput: Record<string, unknown>) {
+    const input: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rawInput ?? {})) {
+        if (value === undefined || value === null) {
+            continue;
+        }
+        input[key] = value;
+    }
+
+    if (toolName === 'dev.summarizeCode') {
+        const inputType = typeof input.inputType === 'string' ? String(input.inputType) : 'path';
+        input.inputType = inputType;
+        if (inputType === 'path') {
+            const relPath = typeof input.path === 'string' ? input.path : undefined;
+            if (!relPath) {
+                throw new Error('`path` is required when `inputType` is `path`.');
+            }
+            try {
+                input.path = resolveWorkspacePath(relPath);
+            } catch {
+                input.path = path.resolve(workspaceRoot, relPath);
+            }
+            delete input.content;
+        } else if (inputType === 'text') {
+            if (typeof input.content !== 'string' || input.content.trim().length === 0) {
+                throw new Error('`content` must be provided when `inputType` is `text`.');
+            }
+            delete input.path;
+        }
+    } else if (typeof input.path === 'string') {
+        try {
+            input.path = resolveWorkspacePath(String(input.path));
+        } catch {
+            input.path = path.resolve(workspaceRoot, String(input.path));
+        }
+    }
+
+    return input;
+}
+
+function toKebabCase(value: string) {
+    return value
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+        .replace(/[_\s]+/g, '-')
+        .toLowerCase();
+}
+
+function stripUndefinedDeep(obj: Record<string, unknown>) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value === undefined || value === null) {
+            continue;
+        }
+        if (Array.isArray(value)) {
+            out[key] = value
+                .map((entry) => (typeof entry === 'object' && entry !== null ? stripUndefinedDeep(entry as Record<string, unknown>) : entry))
+                .filter((entry) => entry !== undefined && entry !== null);
+            continue;
+        }
+        if (typeof value === 'object') {
+            out[key] = stripUndefinedDeep(value as Record<string, unknown>);
+            continue;
+        }
+        out[key] = value;
+    }
+    return out;
+}
+
+function manifestArgsToFlags(args: Record<string, unknown>) {
+    const flags: string[] = [];
+    for (const [key, value] of Object.entries(args)) {
+        if (value === undefined || value === null) {
+            continue;
+        }
+        if (key === 'content' && typeof value === 'string') {
+            // Large free-form content should be delivered via stdin JSON instead of CLI flags.
+            continue;
+        }
+        const flagName = `--${toKebabCase(key)}`;
+        if (Array.isArray(value)) {
+            for (const entry of value) {
+                if (entry === undefined || entry === null) {
+                    continue;
+                }
+                flags.push(flagName, String(entry));
+            }
+            continue;
+        }
+        if (typeof value === 'object') {
+            flags.push(flagName, JSON.stringify(value));
+            continue;
+        }
+        flags.push(flagName, String(value));
+    }
+    return flags;
+}
+
+function buildManifestInvocationAttempts(toolName: string, args: Record<string, unknown>): ManifestInvocationAttempt[] {
+    const sanitized = stripUndefinedDeep(args);
+    const jsonPayload = JSON.stringify({ tool: toolName, arguments: sanitized }, null, 2);
+    const attempts: ManifestInvocationAttempt[] = [
+        {
+            label: 'mcp.call',
+            args: ['mcp', 'call', toolName],
+            stdin: jsonPayload,
+            timeoutMs: manifestToolTimeoutMs
+        }
+    ];
+
+    const segments = toolName.split('.');
+    if (segments.length >= 2) {
+        const category = segments[0];
+        const action = segments
+            .slice(1)
+            .map((segment) => toKebabCase(segment))
+            .join('-');
+        const flagArgs = manifestArgsToFlags(sanitized);
+        attempts.push({
+            label: 'category-command',
+            args: [category, action, ...flagArgs],
+            stdin: JSON.stringify(sanitized, null, 2),
+            timeoutMs: manifestToolTimeoutMs
+        });
+    }
+
+    return attempts;
+}
+
+async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: string; timeoutMs?: number } = {}) {
+    return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+        try {
+            const { command, args } = buildSpawnCommand(commandArgs);
+            console.log(
+                `[cli] Spawning Gemini CLI: ${command} ${args.join(' ')} (timeout=${options.timeoutMs ?? manifestToolTimeoutMs}ms, stdinBytes=${options.stdin ? options.stdin.length : 0})`
+            );
+            const child = spawn(command, args, {
+                cwd: workspaceRoot,
+                stdio: ['pipe', 'pipe', 'pipe'],
+                detached: false,
+                windowsHide: process.platform === 'win32'
+            });
+
+            let stdout = '';
+            let stderr = '';
+            let settled = false;
+
+            child.stdout?.on('data', (chunk) => {
+                stdout += chunk.toString();
+            });
+            child.stderr?.on('data', (chunk) => {
+                stderr += chunk.toString();
+            });
+
+            const timeoutMs = options.timeoutMs ?? manifestToolTimeoutMs;
+            const timer = timeoutMs > 0
+                ? setTimeout(() => {
+                      try {
+                          terminateProcessTree(child);
+                      } catch {
+                          // ignore
+                      }
+                      if (!settled) {
+                          settled = true;
+                          console.warn(
+                              `[cli] Gemini CLI invocation timed out after ${timeoutMs}ms (command=${command} ${args.join(' ')})`
+                          );
+                          reject(new Error(`Gemini CLI call timed out after ${timeoutMs}ms.`));
+                      }
+                  }, timeoutMs)
+                : undefined;
+
+            const payload = `${SILENT_EXEC_PROMPT}\n${options.stdin ?? ''}`;
+            try {
+                child.stdin?.write(payload);
+                child.stdin?.end();
+            } catch {
+                // ignore stdin errors
+            }
+
+            child.on('error', (error) => {
+                if (!settled) {
+                    settled = true;
+                    if (timer) {
+                        clearTimeout(timer);
+                    }
+                    reject(error);
+                }
+            });
+
+            child.on('close', (code) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                if (code === 0) {
+                    console.log(
+                        `[cli] Gemini CLI exited successfully (command=${command} ${args.join(' ')}, stdoutBytes=${stdout.length}, stderrBytes=${stderr.length})`
+                    );
+                    resolve({ stdout, stderr });
+                } else {
+                    const message = stderr.trim() || stdout.trim() || `Gemini CLI exited with code ${code}`;
+                    console.warn(`[cli] Gemini CLI exited with code ${code} (command=${command} ${args.join(' ')}): ${message}`);
+                    reject(new Error(message));
+                }
+            });
+        } catch (error) {
+            console.error('[cli] Failed to launch Gemini CLI process:', error);
+            reject(error instanceof Error ? error : new Error(String(error)));
+        }
+    });
+}
+
+async function invokeManifestTool(toolName: string, args: Record<string, unknown>) {
+    const attempts = buildManifestInvocationAttempts(toolName, args);
+    const errors: string[] = [];
+    for (const attempt of attempts) {
+        try {
+            console.log(
+                `[manifest] Invoking tool ${toolName} via ${attempt.label} (args=${JSON.stringify(attempt.args)}, stdinBytes=${attempt.stdin ? attempt.stdin.length : 0})`
+            );
+            const { stdout } = await runGeminiCliCommand(attempt.args, { stdin: attempt.stdin, timeoutMs: attempt.timeoutMs });
+            const trimmed = stdout.trim();
+            if (!trimmed) {
+                console.warn(`[manifest] Tool ${toolName} via ${attempt.label} returned empty output`);
+                errors.push(`${attempt.label}: empty output`);
+                continue;
+            }
+            try {
+                console.log(
+                    `[manifest] Tool ${toolName} via ${attempt.label} produced JSON (${Buffer.byteLength(trimmed, 'utf8')} bytes)`
+                );
+                return JSON.parse(trimmed);
+            } catch {
+                console.log(
+                    `[manifest] Tool ${toolName} via ${attempt.label} returned non-JSON text (${Buffer.byteLength(trimmed, 'utf8')} bytes)`
+                );
+                return trimmed;
+            }
+        } catch (error) {
+            console.warn(`[manifest] Tool ${toolName} via ${attempt.label} failed: ${formatWorkspaceError(error)}`);
+            errors.push(`${attempt.label}: ${formatWorkspaceError(error)}`);
+        }
+    }
+    throw new Error(errors.join('; '));
 }
 
 registerShutdownHandlers();

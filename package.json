@@ -52,58 +52,6 @@
           "minimum": 1,
           "description": "Maximum queued Gemini worker tasks before rejecting new submissions."
         },
-        "geminiMcp.defaultTimeouts.testsRun": {
-          "type": "number",
-          "default": 600000,
-          "minimum": 0,
-          "description": "Default timeout (ms) for the tests.run tool when none is provided."
-        },
-        "geminiMcp.defaultTimeouts.codeAnalyze": {
-          "type": "number",
-          "default": 300000,
-          "minimum": 0,
-          "description": "Default timeout (ms) for the code.analyze tool when none is provided."
-        },
-        "geminiMcp.defaultTimeouts.codeFormat": {
-          "type": "number",
-          "default": 300000,
-          "minimum": 0,
-          "description": "Default timeout (ms) for the code.format.batch tool when none is provided."
-        },
-        "geminiMcp.defaultTimeouts.taskSubmit": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "description": "Default timeout (ms) for gemini.task.submit jobs (0 disables the timeout)."
-        },
-        "geminiMcp.defaultPriorities.testsRun": {
-          "type": "number",
-          "default": 0,
-          "minimum": -5,
-          "maximum": 5,
-          "description": "Default queue priority for tests.run tasks when the caller omits it."
-        },
-        "geminiMcp.defaultPriorities.codeAnalyze": {
-          "type": "number",
-          "default": 0,
-          "minimum": -5,
-          "maximum": 5,
-          "description": "Default queue priority for code.analyze tasks when the caller omits it."
-        },
-        "geminiMcp.defaultPriorities.codeFormat": {
-          "type": "number",
-          "default": 0,
-          "minimum": -5,
-          "maximum": 5,
-          "description": "Default queue priority for code.format.batch tasks when the caller omits it."
-        },
-        "geminiMcp.defaultPriorities.taskSubmit": {
-          "type": "number",
-          "default": 0,
-          "minimum": -5,
-          "maximum": 5,
-          "description": "Default queue priority for gemini.task.submit tasks when the caller omits it."
-        },
         "geminiMcp.unhealthyStates": {
           "type": "array",
           "items": {

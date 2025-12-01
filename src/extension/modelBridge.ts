@@ -39,7 +39,7 @@ function defaultSocketPath(stdioPath?: string) {
   const workspaceRoot = normalizeWorkspaceRoot();
   const fp = workspaceRoot ? sha1(workspaceRoot).slice(0, 8) : sha1(process.cwd()).slice(0, 8);
   if (process.platform === 'win32') {
-    return `\\.\\pipe\\gemini-mcp-${fp}`;
+    return String.raw`\\.\pipe\gemini-mcp-${fp}`;
   }
   if (workspaceRoot) {
     return path.join(workspaceRoot, '.vscode', 'gemini-mcp', `bridge-${fp}.sock`);

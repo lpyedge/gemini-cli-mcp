@@ -12,24 +12,8 @@ export interface GeminiConfig {
     maxWorkers: number;
     taskCwd: string | undefined;
     maxQueue: number;
-    defaultTimeouts: TimeoutConfig;
-    defaultPriorities: PriorityConfig;
     unhealthyStates?: string[];
     modelBridge: ModelBridgeConfig;
-}
-
-export interface TimeoutConfig {
-    testsRun: number;
-    codeAnalyze: number;
-    codeFormat: number;
-    taskSubmit: number;
-}
-
-export interface PriorityConfig {
-    testsRun: number;
-    codeAnalyze: number;
-    codeFormat: number;
-    taskSubmit: number;
 }
 
 export interface ModelBridgeConfig {

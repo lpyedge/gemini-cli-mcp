@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-import { GeminiConfig, TimeoutConfig, PriorityConfig, ModelBridgeConfig } from './types';
+import { GeminiConfig, ModelBridgeConfig } from './types';
 import { getToolNames } from './mcpManifest';
 
 // Utility helpers for reading extension configuration and small format helpers.
@@ -17,18 +17,6 @@ const DEFAULT_STDIO_PATH = os.platform() === 'win32'
  */
 export function readConfig(): GeminiConfig {
     const config = vscode.workspace.getConfiguration('geminiMcp');
-    const defaultTimeouts: TimeoutConfig = {
-        testsRun: config.get<number>('defaultTimeouts.testsRun', 600000),
-        codeAnalyze: config.get<number>('defaultTimeouts.codeAnalyze', 300000),
-        codeFormat: config.get<number>('defaultTimeouts.codeFormat', 300000),
-        taskSubmit: config.get<number>('defaultTimeouts.taskSubmit', 0)
-    };
-    const defaultPriorities: PriorityConfig = {
-        testsRun: config.get<number>('defaultPriorities.testsRun', 0),
-        codeAnalyze: config.get<number>('defaultPriorities.codeAnalyze', 0),
-        codeFormat: config.get<number>('defaultPriorities.codeFormat', 0),
-        taskSubmit: config.get<number>('defaultPriorities.taskSubmit', 0)
-    };
     // Load allowed tool names from the canonical `mcp.json` manifest.
     // Do NOT fall back to a hard-coded static list — keep `mcp.json` as the single source of truth.
     const manifestToolNames = getToolNames();
@@ -36,7 +24,6 @@ export function readConfig(): GeminiConfig {
     const modelBridge: ModelBridgeConfig = {
         enabled: config.get<boolean>('modelBridge.enabled', false),
         stdioPath: config.get<string>('modelBridge.stdioPath', DEFAULT_STDIO_PATH),
-        
         allowedTools: config.get<string[]>('modelBridge.allowedTools', defaultAllowedTools),
         allowOrchestrator: config.get<boolean>('modelBridge.allowOrchestrator', true),
         requestTimeoutMs: config.get<number>('modelBridge.requestTimeoutMs', 120000),
@@ -47,8 +34,6 @@ export function readConfig(): GeminiConfig {
         maxWorkers: config.get<number>('maxWorkers', 3),
         taskCwd: config.get<string>('taskCwd'),
         maxQueue: config.get<number>('maxQueue', 200),
-        defaultTimeouts,
-        defaultPriorities,
         unhealthyStates: config.get<string[]>('unhealthyStates', ['missing']),
         modelBridge
     };
@@ -76,16 +61,6 @@ export function resolveTaskCwd(raw: string | undefined): string | undefined {
         return path.normalize(path.join(workspaceRoot, raw));
     }
     return undefined;
-}
-
-/** Clamp priority into allowed integer range [-5, 5]. Accepts non-finite numbers.
- * Returns an integer in the allowed range.
- */
-export function clampPriority(value: number) {
-    if (!Number.isFinite(value)) {
-        return 0;
-    }
-    return Math.max(-5, Math.min(5, Math.trunc(value)));
 }
 
 /** Format a duration in milliseconds to a human-readable short string. */

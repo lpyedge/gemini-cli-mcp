@@ -11,7 +11,7 @@ Bring Gemini CLI automations to GitHub Copilot inside VS Code. This extension ex
 ## How the Extension Runs
 
 - Activation: the MCP server is registered as soon as VS Code finishes loading and a workspace (or configured `taskCwd`) exists.
-- Triggering: Copilot invokes Gemini tools automatically when it needs help (for example, when you accept a fix that requires running `tests.run` or `code.format.batch`). No extra confirmation prompts are shown because all calls originate from your local Copilot session.
+- Triggering: Copilot invokes Gemini tools automatically when it needs help. No extra confirmation prompts are shown because all calls originate from your local Copilot session.
 - Visibility: a status-bar item and the **Gemini CLI MCP Tasks** view show running/queued counts, last log lines, and duration. Selecting a task opens `tasks://{id}/log`.
 - Safety: if the CLI fails validation (missing binary, quota exhausted, etc.), Copilot calls are rejected until you fix the issue and reload VS Code.
 
@@ -30,15 +30,14 @@ Bring Gemini CLI automations to GitHub Copilot inside VS Code. This extension ex
 | `maxWorkers` | Maximum concurrent Gemini processes (default `3`). |
 | `taskCwd` | Working directory for spawned tasks (supports `${workspaceFolder}`); must be absolute if no workspace is open. |
 | `maxQueue` | Queue size before new tasks are rejected (default `200`). |
-| `defaultTimeouts.testsRun/codeAnalyze/codeFormat/taskSubmit` | Per-tool default timeouts in ms (`0` = no limit). |
-| `defaultPriorities.testsRun/codeAnalyze/codeFormat/taskSubmit` | Per-tool queue priority from `-5` (low) to `5` (high). |
+| `modelBridge.*` | Settings that control the optional local automation bridge (stdio/socket). |
 
 Changing any of these settings reloads the MCP provider and refreshes the worker status view.
 
 ### Model Automation Bridge
 
 - `geminiMcp.modelBridge.stdioPath` (platform-dependent default): optional path for the local stdio/socket listener; when unset a workspace-derived socket path is used.
-- `geminiMcp.modelBridge.allowedTools`: whitelist of MCP tools that automation callers may invoke; leave empty to allow all registered tools (defaults include `gemini.task.*`, `fs.read`, `fs.write`, `code.analyze`, `code.format.batch`, `tests.run`).
+- `geminiMcp.modelBridge.allowedTools`: whitelist of MCP tools that automation callers may invoke; leave empty to allow all tools discovered from the workspace `mcp.json` manifest.
 - `geminiMcp.modelBridge.allowOrchestrator` (default `true`): when `true`, the bridge also allows orchestrator requests so the orchestrated review workflow can be triggered programmatically.
 - `geminiMcp.modelBridge.requestTimeoutMs` (default `120000`): per-request timeout (ms) for proxied MCP tool calls; requests exceeding this will be canceled and return a timeout response.
 - `geminiMcp.modelBridge.captureSdkMessageId` (default `bestEffort`): how the extension captures SDK-assigned message ids for observability (`sdkHook` | `bestEffort` | `disabled`).
@@ -51,8 +50,7 @@ The bridge gives Copilot-style agents the same model/tool surface that the exten
 Use these when launching VS Code or wrapping `code` in a script (e.g., `.envrc`, shell profile):
 
 - `GEMINI_CLI`, `GEMINI_MAX_WORKERS`, `GEMINI_TASK_CWD`, `GEMINI_MAX_QUEUE`
-- `GEMINI_TIMEOUT_TESTS_RUN`, `GEMINI_TIMEOUT_CODE_ANALYZE`, `GEMINI_TIMEOUT_CODE_FORMAT`, `GEMINI_TIMEOUT_TASK_SUBMIT`
-- `GEMINI_PRIORITY_TESTS_RUN`, `GEMINI_PRIORITY_CODE_ANALYZE`, `GEMINI_PRIORITY_CODE_FORMAT`, `GEMINI_PRIORITY_TASK_SUBMIT`
+- `GEMINI_TIMEOUT_MANIFEST`
 
 The server validates that `GEMINI_TASK_CWD` (or the resolved workspace root) lives inside a workspace folder, your home directory, or the OS temp directory.
 
@@ -80,7 +78,7 @@ All responses include `logUri` pointers so Copilot (or you) can stream output in
 - Task metadata: `.vscode/gemini-mcp/tasks.json`
 - Live status snapshot: `.vscode/gemini-mcp/status.json`
 - Logs: `.vscode/gemini-mcp/logs/{taskId}.log`
-- Cleanup: completed tasks older than 7 days are pruned automatically, or immediately via `gemini.task.prune`.
+- Cleanup: completed tasks older than 7 days are pruned automatically.
 
 ## Notes
 
