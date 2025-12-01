@@ -9,18 +9,21 @@ const levelPrefix: Record<LogLevel, string> = {
 
 function write(level: LogLevel, message: string, details?: unknown) {
     const payload = details === undefined ? message : `${message} ${stringify(details)}`;
+    // In MCP stdio mode, stdout is reserved for JSON-RPC protocol messages.
+    // All diagnostic logs MUST go to stderr to avoid corrupting the transport.
+    const line = `[server] ${levelPrefix[level]} ${payload}`;
     switch (level) {
         case 'warn':
-            console.warn(`[server] ${levelPrefix[level]} ${payload}`);
-            break;
         case 'error':
-            console.error(`[server] ${levelPrefix[level]} ${payload}`);
+            console.error(line);
             break;
         case 'debug':
-            console.debug(`[server] ${levelPrefix[level]} ${payload}`);
+            // debug also goes to stderr
+            console.error(line);
             break;
         default:
-            console.log(`[server] ${levelPrefix[level]} ${payload}`);
+            // info goes to stderr (not stdout!) to avoid MCP protocol interference
+            console.error(line);
             break;
     }
 }

@@ -24,6 +24,5 @@ server/dist/**
 !LICENSE
 !dist/extension.js
 !server/dist/index.js
-!server/dist/spawnHelpers.js
 !package.json
 !mcp.json

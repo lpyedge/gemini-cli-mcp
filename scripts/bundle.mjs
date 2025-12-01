@@ -21,13 +21,7 @@ const targets = [
     outfile: path.join(projectRoot, 'server', 'dist', 'index.js'),
     external: []
   }
-  ,
-  {
-    name: 'spawnHelpers',
-    entry: path.join(projectRoot, 'server', 'src', 'gemini', 'spawnHelpers.ts'),
-    outfile: path.join(projectRoot, 'server', 'dist', 'spawnHelpers.js'),
-    external: []
-  }
+  
 ];
 
 mkdirSync(path.join(projectRoot, 'dist'), { recursive: true });

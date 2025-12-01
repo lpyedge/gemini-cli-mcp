@@ -9,12 +9,11 @@ import { jsonSchemaToZod, dereferenceSchema } from '../lib/schemaUtils.js';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WorkerPool } from '../task/workerPool.js';
-import { terminateProcessTree, execGeminiCommand } from '../gemini/processUtils.js';
-import { buildSpawnCommand, setGeminiBin, geminiBin } from '../gemini/spawnHelpers.js';
+import { getDetectedGeminiPath, GeminiProvider, getGeminiProvider, GeminiHealthResult, GeminiMode } from '../gemini/geminiProvider.js';
 import { SILENT_EXEC_PROMPT, serializeErrorForClient, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv } from '../core/utils.js';
 import { createPersistenceManager } from '../task/persistenceManager.js';
 import { logger } from '../core/logger.js';
-export { buildSpawnCommand, setGeminiBin } from '../gemini/spawnHelpers.js';
+// gemini provider exports are imported above; no re-exports needed here
 import { TaskRecord, TaskStatus } from '../task/types.js';
 
 // geminiBin and related helpers are provided by server/src/gemini/spawnHelpers.ts
@@ -54,13 +53,29 @@ interface CliStatusSnapshot {
     message: string;
     lastChecked: number;
     version?: string;
+    mode?: GeminiMode; // 'core' | 'cli' | 'unknown'
 }
 let cliStatus: CliStatusSnapshot = {
     state: 'unknown',
     message: 'Gemini CLI health check pending.',
-    lastChecked: Date.now()
+    lastChecked: Date.now(),
+    mode: 'unknown'
 };
 let cliCheckPromise: Promise<void> | undefined;
+
+// Initialize GeminiProvider singleton with workspace settings
+let geminiProvider: GeminiProvider | null = null;
+function getOrCreateGeminiProvider(): GeminiProvider {
+    if (!geminiProvider) {
+            geminiProvider = new GeminiProvider({
+                cwd: workspaceRoot,
+                targetDir: workspaceRoot,
+                debugMode: false,
+                authType: 'oauth' // Default to free tier (LOGIN_WITH_GOOGLE)
+            });
+    }
+    return geminiProvider;
+}
 let acceptingTasks = false;
 const allowedCwdRoots = [workspaceRoot, os.tmpdir(), os.homedir()].map((p) => path.normalize(p));
 const manifestToolTimeoutMs = readTimeoutEnv('GEMINI_TIMEOUT_MANIFEST', 120000);
@@ -68,30 +83,8 @@ const manifestToolTimeoutMs = readTimeoutEnv('GEMINI_TIMEOUT_MANIFEST', 120000);
 const tasks = new Map<string, TaskRecord>();
 const taskEvents = new EventEmitter();
 const pool = new WorkerPool(workerCount);
-// Try to reuse a persisted gemini CLI path if the extension previously stored it
-try {
-    const persisted = fsSync.readFileSync(statusFile, 'utf8');
-    if (persisted) {
-        try {
-            const parsed = JSON.parse(persisted);
-            const persistedGemini = parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath);
-            if (persistedGemini && String(persistedGemini).trim().length > 0) {
-                try {
-                    setGeminiBin(String(persistedGemini));
-                    logger.info('server: using persisted gemini path from status.json', {
-                        geminiPath: String(persistedGemini)
-                    });
-                } catch (e) {
-                    logger.warn('server: failed to apply persisted gemini path', String(e));
-                }
-            }
-        } catch {
-            // ignore malformed status file
-        }
-    }
-} catch {
-    // statusFile may not exist yet; ignore
-}
+// Previously we attempted to pre-load a persisted gemini path from status.json.
+// That responsibility is now encapsulated within `GeminiProvider` (detection/persistence).
 
 const persistence = createPersistenceManager({
     tasks,
@@ -120,23 +113,35 @@ async function broadcastStatusSnapshot() {
         // Prefer high-level send APIs if available, otherwise send raw JSON-RPC notification.
         try {
             const anyServer: any = server as any;
+            try {
+                logger.info('server: broadcasting status snapshot', { tasks: (payload as any).tasks?.length ?? 0, cliStatus: (payload as any).cliStatus ?? null });
+            } catch {
+                logger.info('server: broadcasting status snapshot (meta unknown)');
+            }
             if (typeof anyServer.sendNotification === 'function') {
+                logger.info('server: using server.sendNotification to publish gemini/statusSnapshot');
                 anyServer.sendNotification('gemini/statusSnapshot', payload);
                 return;
             }
             if (typeof anyServer.notification === 'function') {
                 // some implementations expose notification helper
+                logger.info('server: using server.notification helper to publish gemini/statusSnapshot');
                 anyServer.notification({ method: 'gemini/statusSnapshot', params: payload });
                 return;
             }
             // Fallback: use transport.send if available
             const transport = (anyServer as any)._transport;
             if (transport && typeof transport.send === 'function') {
+                logger.info('server: using transport.send to publish gemini/statusSnapshot via transport');
                 // send a JSON-RPC notification
-                void transport.send({ jsonrpc: '2.0', method: 'gemini/statusSnapshot', params: payload }).catch(() => {});
+                void transport.send({ jsonrpc: '2.0', method: 'gemini/statusSnapshot', params: payload }).catch((err: any) => {
+                    try { logger.warn('server: transport.send failed to deliver statusSnapshot', String(err)); } catch {}
+                });
+            } else {
+                logger.warn('server: no transport available to send status snapshot');
             }
-        } catch {
-            // ignore errors when attempting to send
+        } catch (err) {
+            try { logger.warn('server: failed to broadcast status snapshot', String(err)); } catch {}
         }
     } catch (err) {
         try { logger.warn('server: failed to build status snapshot', String(err)); } catch {}
@@ -590,12 +595,14 @@ function registerShutdownHandlers() {
 // `formatWorkspaceError` moved to `server/src/core/utils.ts`
 
 async function validateGeminiExecutable() {
-    if (geminiBin.includes(path.sep)) {
-        try {
-            await fs.access(geminiBin);
-        } catch {
-            throw new Error(`Gemini CLI not found at ${geminiBin}`);
+    // If provider detected an explicit gemini path, validate it.
+    try {
+        const detected = getDetectedGeminiPath();
+        if (detected && detected.includes(path.sep)) {
+            await fs.access(detected);
         }
+    } catch {
+        throw new Error(`Gemini CLI not found at detected path`);
     }
 }
 
@@ -610,48 +617,39 @@ async function updateCliStatus(reason: string) {
     }
     cliCheckPromise = (async () => {
         try {
-            const v = buildSpawnCommand(['--version']);
-            logger.info('cli: checking status', {
-                reason,
-                command: v.command,
-                args: v.args
-            });
-                // Diagnostic: record the server process environment and resolved gemini binary
-                try {
-                    logger.info('cli: spawn environment', {
-                        PATH: process.env.PATH,
-                        geminiBin: geminiBin,
-                        ComSpec: process.env.ComSpec,
-                        cwd: process.cwd()
-                    });
-                } catch (e) {
-                    // ignore logging errors
-                }
-            const { stdout, stderr } = await execGeminiCommand(v.command, v.args);
-            const versionLine =
-                stdout
-                    .split(/\r?\n/)
-                    .map((line) => line.trim())
-                    .find((line) => line.length > 0) ||
-                stderr
-                    .split(/\r?\n/)
-                    .map((line) => line.trim())
-                    .find((line) => line.length > 0) ||
-                'Gemini CLI';
-            cliStatus = {
-                state: 'ok',
-                message: versionLine,
-                version: versionLine,
-                lastChecked: Date.now()
-            };
-            acceptingTasks = true;
-            logger.info('cli: ready', { version: versionLine });
+            logger.info('cli: checking status via GeminiProvider', { reason });
+            
+            // Use GeminiProvider which tries core first, then CLI fallback
+            const provider = getOrCreateGeminiProvider();
+            const healthResult = await provider.checkHealth();
+            
+            if (healthResult.available) {
+                cliStatus = {
+                    state: 'ok',
+                    message: healthResult.message,
+                    version: healthResult.version,
+                    lastChecked: Date.now(),
+                    mode: healthResult.mode
+                };
+                acceptingTasks = true;
+                logger.info('cli: ready', { 
+                    mode: healthResult.mode,
+                    version: healthResult.version,
+                    message: healthResult.message
+                });
+            } else {
+                // Neither core nor CLI available
+                const message = healthResult.message;
+                logger.warn('cli: failed to update status', {
+                    reason,
+                    state: 'missing',
+                    message
+                });
+                enterCliFailure('missing', `${message} [${reason}]`, { force: true });
+            }
         } catch (error) {
             const message = formatWorkspaceError(error);
             const state = classifyCliFailure(message);
-            // Only force marking the CLI as unavailable for high-confidence states
-            // like 'missing' or 'quota_exhausted'. Generic 'error' should not
-            // immediately force a global failure since it may be transient.
             const shouldForce = state !== 'error';
             logger.warn('cli: failed to update status', {
                 reason,
@@ -877,8 +875,9 @@ async function start() {
 
 async function persistDiscoveredGeminiPathIfMissing() {
     try {
-        // Only persist when geminiBin looks like an explicit path (contains path separator)
-        if (!geminiBin || !geminiBin.includes(path.sep)) {
+        // Only persist when provider has detected an explicit path (contains path separator)
+        const bin = getDetectedGeminiPath();
+        if (!bin || !bin.includes(path.sep)) {
             return;
         }
         // Ensure state directory exists
@@ -903,12 +902,12 @@ async function persistDiscoveredGeminiPathIfMissing() {
             // already persisted
             return;
         }
-        parsed.geminiPath = String(geminiBin);
+        parsed.geminiPath = String(bin);
         parsed.updatedAt = Date.now();
         await fs.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
         logger.info('server: persisted discovered gemini path', {
             statusFile,
-            geminiPath: String(geminiBin)
+            geminiPath: String(bin)
         });
     } catch (err) {
         // best-effort; do not fail startup
@@ -1171,103 +1170,11 @@ function buildManifestInvocationAttempts(toolName: string, args: Record<string, 
 }
 
 async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: string; timeoutMs?: number } = {}) {
-    return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-        try {
-            const { command, args } = buildSpawnCommand(commandArgs);
-            logger.info('cli: spawning Gemini CLI', {
-                command,
-                args,
-                timeoutMs: options.timeoutMs ?? manifestToolTimeoutMs,
-                stdinBytes: options.stdin ? options.stdin.length : 0
-            });
-            const child = spawn(command, args, {
-                cwd: workspaceRoot,
-                stdio: ['pipe', 'pipe', 'pipe'],
-                detached: false,
-                windowsHide: process.platform === 'win32'
-            });
-
-            let stdout = '';
-            let stderr = '';
-            let settled = false;
-
-            child.stdout?.on('data', (chunk) => {
-                stdout += chunk.toString();
-            });
-            child.stderr?.on('data', (chunk) => {
-                stderr += chunk.toString();
-            });
-
-            const timeoutMs = options.timeoutMs ?? manifestToolTimeoutMs;
-            const timer = timeoutMs > 0
-                ? setTimeout(() => {
-                      try {
-                          terminateProcessTree(child);
-                      } catch {
-                          // ignore
-                      }
-                      if (!settled) {
-                          settled = true;
-                          logger.warn('cli: invocation timed out', {
-                              timeoutMs,
-                              command,
-                              args
-                          });
-                          reject(new Error(`Gemini CLI call timed out after ${timeoutMs}ms.`));
-                      }
-                  }, timeoutMs)
-                : undefined;
-
-            const payload = `${SILENT_EXEC_PROMPT}\n${options.stdin ?? ''}`;
-            try {
-                child.stdin?.write(payload);
-                child.stdin?.end();
-            } catch {
-                // ignore stdin errors
-            }
-
-            child.on('error', (error) => {
-                if (!settled) {
-                    settled = true;
-                    if (timer) {
-                        clearTimeout(timer);
-                    }
-                    reject(error);
-                }
-            });
-
-            child.on('close', (code) => {
-                if (settled) {
-                    return;
-                }
-                settled = true;
-                if (timer) {
-                    clearTimeout(timer);
-                }
-                if (code === 0) {
-                    logger.info('cli: invocation succeeded', {
-                        command,
-                        args,
-                        stdoutBytes: stdout.length,
-                        stderrBytes: stderr.length
-                    });
-                    resolve({ stdout, stderr });
-                } else {
-                    const message = stderr.trim() || stdout.trim() || `Gemini CLI exited with code ${code}`;
-                    logger.warn('cli: invocation exited with non-zero code', {
-                        command,
-                        args,
-                        code,
-                        message
-                    });
-                    reject(new Error(message));
-                }
-            });
-        } catch (error) {
-            logger.error('cli: failed to launch Gemini CLI process', String(error));
-            reject(error instanceof Error ? error : new Error(String(error)));
-        }
-    });
+    // Delegate to GeminiProvider which centralizes CLI spawn behavior
+    const provider = getOrCreateGeminiProvider();
+    const payload = `${SILENT_EXEC_PROMPT}\n${options.stdin ?? ''}`;
+    const res = await provider.runCliCommand(commandArgs, { cwd: workspaceRoot, env: undefined, stdin: payload, timeoutMs: options.timeoutMs });
+    return { stdout: res.stdout, stderr: res.stderr };
 }
 
 async function invokeManifestTool(toolName: string, args: Record<string, unknown>) {

@@ -157,7 +157,7 @@
   "files": [
     "dist/extension.js",
     "server/dist/index.js",
-    "server/dist/spawnHelpers.js",
+    
     "package.json",
     "LICENSE",
     "README.md",
