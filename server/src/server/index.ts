@@ -113,6 +113,59 @@ const server = new McpServer({
     version: '0.2.0'
 });
 
+// Build and send a live status snapshot to connected MCP clients (extension).
+async function broadcastStatusSnapshot() {
+    try {
+        const payload = persistence.buildLiveStatusPayload();
+        // Prefer high-level send APIs if available, otherwise send raw JSON-RPC notification.
+        try {
+            const anyServer: any = server as any;
+            if (typeof anyServer.sendNotification === 'function') {
+                anyServer.sendNotification('gemini/statusSnapshot', payload);
+                return;
+            }
+            if (typeof anyServer.notification === 'function') {
+                // some implementations expose notification helper
+                anyServer.notification({ method: 'gemini/statusSnapshot', params: payload });
+                return;
+            }
+            // Fallback: use transport.send if available
+            const transport = (anyServer as any)._transport;
+            if (transport && typeof transport.send === 'function') {
+                // send a JSON-RPC notification
+                void transport.send({ jsonrpc: '2.0', method: 'gemini/statusSnapshot', params: payload }).catch(() => {});
+            }
+        } catch {
+            // ignore errors when attempting to send
+        }
+    } catch (err) {
+        try { logger.warn('server: failed to build status snapshot', String(err)); } catch {}
+    }
+}
+
+// Subscribe to task and pool events to propagate live status snapshots to clients.
+try {
+    taskEvents.on('update', () => {
+        try {
+            void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
+        } catch {}
+    });
+    if (typeof pool.on === 'function') {
+        pool.on('changed', () => {
+            try {
+                void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
+            } catch {}
+        });
+        pool.on('queue', () => {
+            try {
+                void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
+            } catch {}
+        });
+    }
+} catch {
+    // best-effort: do not crash if subscriptions fail
+}
+
 const manifestSchema = z
     .object({
         version: z.string().optional(),
@@ -645,7 +698,9 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
         acceptingTasks = false;
         cliStatus = { state, message, lastChecked: Date.now() };
         persistence.scheduleStatusSnapshot();
-        void persistence.persistLiveStatus();
+        void persistence.persistLiveStatus().then(() => {
+            try { void broadcastStatusSnapshot(); } catch {}
+        }).catch(() => {});
         return;
     }
 
@@ -663,7 +718,9 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
         }
     }
     persistence.scheduleStatusSnapshot();
-    void persistence.persistLiveStatus();
+    void persistence.persistLiveStatus().then(() => {
+        try { void broadcastStatusSnapshot(); } catch {}
+    }).catch(() => {});
 }
 
 function maybeUpdateCliStatusFromFailure(message: string) {
@@ -718,6 +775,12 @@ async function start() {
     startCliHealthWatcher();
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    // After transport is connected, send an initial status snapshot to clients
+    try {
+        await broadcastStatusSnapshot();
+    } catch {
+        // ignore notification failures
+    }
 }
 
 async function persistDiscoveredGeminiPathIfMissing() {
@@ -839,7 +902,17 @@ async function loadMcpManifest() {
                             }
                         }
                     );
-                    logger.info('manifest: registered tool', { toolName });
+                        logger.info('manifest: registered tool', { toolName });
+                        // Also emit a clear, human-readable single-line message per tool
+                        try {
+                            const title = (t.title && String(t.title).trim().length > 0) ? String(t.title) : undefined;
+                            const desc = (t.description && String(t.description).trim().length > 0) ? String(t.description) : undefined;
+                            const extra = title ? ` title="${title}"` : '';
+                            const extraDesc = desc ? ` description="${desc}"` : '';
+                            logger.info(`manifest: tool registered: ${toolName}${extra}${extraDesc}`);
+                        } catch {
+                            // ignore logging formatting errors
+                        }
                     advertisedTools.push(toolName);
                 } catch (regErr: any) {
                     const msg = String((regErr && regErr.message) || regErr);

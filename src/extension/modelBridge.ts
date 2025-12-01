@@ -10,6 +10,7 @@ import { ModelBridgeConfig } from './types';
 import { getMcpClient, callTool } from './mcpClient';
 import { runOrchestrator } from './orchestrator';
 import { logger } from './logger';
+import { getLatestStatusSnapshot } from './mcpClient';
 
 
 interface BridgeResponder {
@@ -150,24 +151,19 @@ export async function startStdioBridge(cfg: any, onConnection?: (socket: import(
     try { fs.chmodSync(socketPath, 0o600); } catch (err) { logger.warn('modelBridge: chmod failed', { socketPath, error: String(err) }); }
   }
 
-  try {
-    const workspaceRoot = normalizeWorkspaceRoot();
-    if (workspaceRoot) {
-      const statusFile = path.join(workspaceRoot, '.vscode', 'gemini-mcp', 'status.json');
+    try {
+      // Do not write status.json on the extension side. Use MCP notifications
+      // (server -> extension) as the authoritative channel for status. Record
+      // the socket path in-memory and log it so users can see it in the Output.
+      const workspaceRoot = normalizeWorkspaceRoot();
       try {
-        const existing = await fsPromises.readFile(statusFile, 'utf8').catch(() => undefined);
-        let parsed: any = existing ? JSON.parse(existing) : {};
-        parsed.stdioPath = socketPath;
-        parsed.stdioPid = process.pid;
-        parsed.stdioUpdated = Date.now();
-        await fsPromises.mkdir(path.dirname(statusFile), { recursive: true }).catch(() => {});
-        await fsPromises.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
-        logger.info('modelBridge: persisted socket path', { socketPath, statusFile });
-      } catch (err) {
-        logger.warn('modelBridge: failed to persist socket path', String(err));
-      }
-    }
-  } catch {}
+        const snapshot = getLatestStatusSnapshot();
+        if (snapshot && snapshot.stdioPath) {
+          logger.info('modelBridge: server already reports stdioPath', { serverStdioPath: snapshot.stdioPath });
+        }
+      } catch {}
+      logger.info('modelBridge: socket available (in-memory)', { socketPath });
+    } catch {}
 
   server.on('close', () => {
     if (process.platform !== 'win32') {

@@ -6,6 +6,7 @@ import { GeminiCliHealth, } from './cliHealth';
 import { GeminiTaskTreeProvider } from './treeProvider';
 import { LiveStatusSnapshot, LiveTaskSummary } from './types';
 import { resolveTaskCwd, formatDuration } from './configUtils';
+import { getLatestStatusSnapshot, onStatusSnapshot } from './mcpClient';
 
 const STATUS_POLL_INTERVAL_MS = 3000;
 const TOOLTIP_TASK_LIMIT = 5;
@@ -30,9 +31,23 @@ export class TaskStatusMonitor implements vscode.Disposable {
         private readonly treeProvider: GeminiTaskTreeProvider,
         private readonly cliHealth: GeminiCliHealth
     ) {
-        this.refreshWatchers();
+        // Initialize from latest known snapshot (if any) and subscribe to updates
+        try {
+            const initial = getLatestStatusSnapshot();
+            if (initial) {
+                this.snapshot = initial;
+                this.snapshotSource = undefined;
+            }
+        } catch {}
         void this.refresh();
-        this.startPolling();
+        const unsub = onStatusSnapshot((s: any) => {
+            try {
+                this.snapshot = s;
+                this.snapshotSource = undefined;
+                this.renderStatus();
+            } catch {}
+        });
+        this.disposables.push(new vscode.Disposable(unsub));
         this.disposables.push(
             this.cliHealth.onDidChange(() => {
                 this.renderStatus();
@@ -109,32 +124,14 @@ export class TaskStatusMonitor implements vscode.Disposable {
     }
 
     private refreshWatchers() {
+        // Deprecated: filesystem watchers no longer required; server pushes snapshots via MCP.
         this.watchers.forEach((w) => w.dispose());
         this.watchers = [];
-        this.candidateStatusUris = this.buildCandidateStatusUris();
-        for (const uri of this.candidateStatusUris) {
-            const dir = vscode.Uri.file(path.dirname(uri.fsPath));
-            const pattern = new vscode.RelativePattern(dir, path.basename(uri.fsPath));
-            const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-            this.watchers.push(watcher);
-            this.disposables.push(
-                watcher.onDidChange(() => this.refresh()),
-                watcher.onDidCreate(() => this.refresh()),
-                watcher.onDidDelete(() => this.refresh())
-            );
-        }
+        this.candidateStatusUris = [];
     }
 
     private startPolling() {
-        this.stopPolling();
-        this.refreshTimer = setInterval(() => {
-            void this.refresh();
-        }, STATUS_POLL_INTERVAL_MS);
-        this.disposables.push(
-            new vscode.Disposable(() => {
-                this.stopPolling();
-            })
-        );
+        // Polling not required when server pushes snapshots; keep method for compatibility.
     }
 
     private stopPolling() {
@@ -242,25 +239,17 @@ export class TaskStatusMonitor implements vscode.Disposable {
     }
 
     private async readLatestSnapshot() {
-        let best: { snapshot: LiveStatusSnapshot; uri: vscode.Uri; updated: number } | undefined;
-        for (const uri of this.candidateStatusUris) {
-            try {
-                const buffer = await fs.readFile(uri.fsPath, 'utf8');
-                const parsed = JSON.parse(buffer) as LiveStatusSnapshot;
-                const updated = parsed.updatedAt ?? (await fs.stat(uri.fsPath)).mtimeMs;
-                if (!best || updated > best.updated) {
-                    best = { snapshot: parsed, uri, updated };
-                }
-            } catch {
-                // ignore and try next candidate
+        try {
+            const s = getLatestStatusSnapshot();
+            if (s) {
+                this.snapshot = s as LiveStatusSnapshot;
+                this.snapshotSource = undefined;
+                return;
             }
+        } catch {
+            // ignore
         }
-        if (best) {
-            this.snapshot = best.snapshot;
-            this.snapshotSource = best.uri;
-        } else {
-            this.snapshot = undefined;
-            this.snapshotSource = undefined;
-        }
+        this.snapshot = undefined;
+        this.snapshotSource = undefined;
     }
 }

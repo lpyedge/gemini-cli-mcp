@@ -6,6 +6,17 @@ import { logger } from './logger';
 import { resolveTaskCwd } from './configUtils';
 
 let cached: { client: any; transport: any } | undefined;
+let latestStatusSnapshot: any | undefined = undefined;
+const statusListeners = new Set<(s: any) => void>();
+
+export function getLatestStatusSnapshot() {
+  return latestStatusSnapshot;
+}
+
+export function onStatusSnapshot(cb: (s: any) => void) {
+  statusListeners.add(cb);
+  return () => statusListeners.delete(cb);
+}
 
 function sanitizeEnv(rawEnv: NodeJS.ProcessEnv) {
   const env: Record<string, string> = {};
@@ -122,6 +133,41 @@ export async function getMcpClient(cfg: any) {
 
   const client = new Client({ name: 'vscode-mcp-client', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
   await client.connect(transport);
+  // Register notification handler for server status snapshots so extension
+  // receives authoritative live status via MCP instead of reading status.json
+  try {
+    const anyClient: any = client;
+    if (typeof anyClient.onNotification === 'function') {
+      anyClient.onNotification('gemini/statusSnapshot', (params: any) => {
+        try {
+          latestStatusSnapshot = params;
+          logger.info('gemini: status snapshot received', params);
+          for (const l of Array.from(statusListeners)) {
+            try { l(params); } catch {}
+          }
+        } catch (e) {
+          // swallow
+        }
+      });
+    } else if (typeof anyClient.on === 'function') {
+      // SDK may surface a generic 'notification' event
+      anyClient.on('notification', (n: any) => {
+        try {
+          if (n && n.method === 'gemini/statusSnapshot') {
+            latestStatusSnapshot = n.params;
+            logger.info('gemini: status snapshot received', n.params);
+            for (const l of Array.from(statusListeners)) {
+              try { l(n.params); } catch {}
+            }
+          }
+        } catch {
+          // ignore
+        }
+      });
+    }
+  } catch {
+    // best-effort: do not block client.connect on notification wiring
+  }
   // Install outgoing-message capture depending on configured capture mode.
   try {
     const anyClient: any = client;
