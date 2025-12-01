@@ -219,64 +219,66 @@ const summaryTemplate = new ResourceTemplate('tasks://{id}/summary', {
     }
 });
 
-server.registerResource(
-    'task-log',
-    logTemplate,
-    {
-        title: 'Gemini task log',
-        description: 'Streaming stdout/stderr for a Gemini CLI task.',
-        mimeType: 'text/plain'
-    },
-    async (_uri, variables) => {
-        const id = normalizeTemplateVariable(variables.id);
-        if (!id) {
-            return readResourceText('Invalid task id.');
+function registerResources() {
+    server.registerResource(
+        'task-log',
+        logTemplate,
+        {
+            title: 'Gemini task log',
+            description: 'Streaming stdout/stderr for a Gemini CLI task.',
+            mimeType: 'text/plain'
+        },
+        async (_uri, variables) => {
+            const id = normalizeTemplateVariable(variables.id);
+            if (!id) {
+                return readResourceText('Invalid task id.');
+            }
+            const task = tasks.get(id);
+            if (!task) {
+                return readResourceText(`Task ${id} not found.`);
+            }
+            const logText = await readTaskLog(task);
+            return readResourceText(logText, id);
         }
-        const task = tasks.get(id);
-        if (!task) {
-            return readResourceText(`Task ${id} not found.`);
-        }
-        const logText = await readTaskLog(task);
-        return readResourceText(logText, id);
-    }
-);
+    );
 
-server.registerResource(
-    'task-summary',
-    summaryTemplate,
-    {
-        title: 'Gemini task summary',
-        description: 'Metadata for a Gemini CLI task.',
-        mimeType: 'application/json'
-    },
-    async (_uri, variables) => {
-        const id = normalizeTemplateVariable(variables.id);
-        if (!id) {
-            return readResourceText('Invalid task id.');
+    server.registerResource(
+        'task-summary',
+        summaryTemplate,
+        {
+            title: 'Gemini task summary',
+            description: 'Metadata for a Gemini CLI task.',
+            mimeType: 'application/json'
+        },
+        async (_uri, variables) => {
+            const id = normalizeTemplateVariable(variables.id);
+            if (!id) {
+                return readResourceText('Invalid task id.');
+            }
+            const task = tasks.get(id);
+            if (!task) {
+                return readResourceText(`Task ${id} not found.`);
+            }
+            await updateLogLength(task);
+            const summary = {
+                id: task.id,
+                toolName: task.toolName,
+                status: task.status,
+                createdAt: task.createdAt,
+                startedAt: task.startedAt,
+                completedAt: task.completedAt,
+                updatedAt: task.updatedAt,
+                exitCode: task.exitCode,
+                timeoutMs: task.timeoutMs,
+                logUri: `tasks://${task.id}/log`,
+                cwd: task.cwd,
+                error: task.error,
+                logLength: task.logLength
+            };
+            return readResourceText(JSON.stringify(summary, null, 2), task.id);
         }
-        const task = tasks.get(id);
-        if (!task) {
-            return readResourceText(`Task ${id} not found.`);
-        }
-        await updateLogLength(task);
-        const summary = {
-            id: task.id,
-            toolName: task.toolName,
-            status: task.status,
-            createdAt: task.createdAt,
-            startedAt: task.startedAt,
-            completedAt: task.completedAt,
-            updatedAt: task.updatedAt,
-            exitCode: task.exitCode,
-            timeoutMs: task.timeoutMs,
-            logUri: `tasks://${task.id}/log`,
-            cwd: task.cwd,
-            error: task.error,
-            logLength: task.logLength
-        };
-        return readResourceText(JSON.stringify(summary, null, 2), task.id);
-    }
-);
+    );
+}
 
 function textResponse(payload: unknown) {
     const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
@@ -614,6 +616,17 @@ async function updateCliStatus(reason: string) {
                 command: v.command,
                 args: v.args
             });
+                // Diagnostic: record the server process environment and resolved gemini binary
+                try {
+                    logger.info('cli: spawn environment', {
+                        PATH: process.env.PATH,
+                        geminiBin: geminiBin,
+                        ComSpec: process.env.ComSpec,
+                        cwd: process.cwd()
+                    });
+                } catch (e) {
+                    // ignore logging errors
+                }
             const { stdout, stderr } = await execGeminiCommand(v.command, v.args);
             const versionLine =
                 stdout
@@ -756,37 +769,110 @@ async function start() {
         pid: process.pid,
         workspace: workspaceRoot
     });
-    await validateGeminiExecutable();
-    await updateCliStatus('startup');
-    // If we have a discovered absolute gemini binary and the workspace
-    // status.json does not already contain a persisted path, write it
-    // so subsequent extension/server launches can reuse the absolute path
-    // instead of relying on PATH discovery.
+    // Ensure minimal state directories exist so persistence/lock operations work
     try {
-        await persistDiscoveredGeminiPathIfMissing();
+        await fs.mkdir(stateDir, { recursive: true });
     } catch (err) {
-        logger.warn('server: failed to persist discovered gemini path', String(err));
+        logger.warn('server: failed to ensure state directories', String(err));
     }
-    await persistence.loadPersistedTasks();
-    // Load and register tool metadata from mcp.json (manifest)
-    await loadMcpManifest();
-    await persistence.pruneOldTasks();
-    await persistence.persistLiveStatus();
-    startCliHealthWatcher();
+
+    // Connect transport early so the MCP host (extension) can detect the server
+    // process is up. Post-start work (health checks, manifest loading, task
+    // persistence) runs asynchronously and will broadcast snapshots when ready.
+    // Load and register tool metadata from mcp.json (manifest) before connecting
+    // the transport so tool capabilities can be registered without error.
+    try {
+        await loadMcpManifest();
+    } catch (err) {
+        logger.warn('server: failed to load MCP manifest (continuing startup)', String(err));
+    }
+
+    // Register built-in resources after manifest load but before connect so
+    // resource capability registration happens prior to transport connect.
+    try {
+        registerResources();
+    } catch (err) {
+        logger.warn('server: failed to register resources (continuing startup)', String(err));
+    }
+
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    // After transport is connected, send an initial status snapshot to clients
+
+    // Immediately send an initial (possibly empty) snapshot so clients know
+    // the server is alive even before heavier background tasks complete.
     try {
-        await broadcastStatusSnapshot();
+        void broadcastStatusSnapshot();
     } catch {
         // ignore notification failures
     }
 
-    // Emit an explicit ready line so the extension can detect that the
-    // server process has successfully started and bound its transport.
+    // Emit a ready line for the extension to detect successful startup.
     try {
         logger.info('server: ready', { pid: process.pid, workspace: workspaceRoot });
     } catch {}
+
+    // Run background initialization tasks without blocking server startup.
+    (async function postStartWork() {
+        try {
+            // Validate gemini executable and perform initial CLI health check.
+            try {
+                await validateGeminiExecutable();
+            } catch (err) {
+                logger.warn('server: gemini validation failed (continuing startup)', String(err));
+            }
+
+            try {
+                await updateCliStatus('startup');
+            } catch (err) {
+                logger.warn('server: initial CLI health check failed (continuing startup)', String(err));
+            }
+
+            // Persist discovered gemini path if present (best-effort)
+            try {
+                await persistDiscoveredGeminiPathIfMissing();
+            } catch (err) {
+                logger.warn('server: failed to persist discovered gemini path', String(err));
+            }
+
+
+                    // Load persisted tasks; manifest is loaded prior to transport connect
+                    try {
+                        await persistence.loadPersistedTasks();
+                    } catch (err) {
+                        logger.warn('server: failed to load persisted tasks', String(err));
+                    }
+
+            try {
+                await persistence.pruneOldTasks();
+            } catch (err) {
+                logger.warn('server: pruneOldTasks failed', String(err));
+            }
+
+            try {
+                await persistence.persistLiveStatus();
+            } catch (err) {
+                logger.warn('server: persistLiveStatus failed', String(err));
+            }
+
+            // Start any periodic/long-running watchers (no-op by default)
+            try {
+                startCliHealthWatcher();
+            } catch (err) {
+                logger.warn('server: startCliHealthWatcher failed', String(err));
+            }
+
+            // After background init, broadcast an updated snapshot so extensions
+            // receive the full state (tasks, cliStatus, etc.). Failures here are
+            // non-fatal; clients will receive updates as things change.
+            try {
+                void broadcastStatusSnapshot();
+            } catch (err) {
+                logger.warn('server: failed to broadcast post-start snapshot', String(err));
+            }
+        } catch (err) {
+            logger.warn('server: unexpected error during post-start work', String(err));
+        }
+    })();
 }
 
 async function persistDiscoveredGeminiPathIfMissing() {

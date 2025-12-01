@@ -113,17 +113,15 @@ export async function getMcpClient(cfg: any) {
     }
   }
 
-  tAny.stdout?.on && tAny.stdout?.on('data', (c: any) => forwardServerOutput(c, 'info'));
-  tAny.stderr?.on && tAny.stderr?.on('data', (c: any) => forwardServerOutput(c, 'warn'));
-
   const client = new Client({ name: 'vscode-mcp-client', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
-  await client.connect(transport);
-  // Register notification handler for server status snapshots so extension
-  // receives authoritative live status via MCP instead of reading status.json
+
+  // Register notification handler for server status snapshots BEFORE connecting
+  // to avoid a race where the server sends an initial snapshot during or
+  // immediately after connect and the handler is not yet installed.
   try {
-    const anyClient: any = client;
-    if (typeof anyClient.onNotification === 'function') {
-      anyClient.onNotification('gemini/statusSnapshot', (params: any) => {
+    const anyClientPre: any = client;
+    if (typeof anyClientPre.onNotification === 'function') {
+      anyClientPre.onNotification('gemini/statusSnapshot', (params: any) => {
         try {
           latestStatusSnapshot = params;
           logger.info('gemini: status snapshot received', params);
@@ -134,9 +132,9 @@ export async function getMcpClient(cfg: any) {
           // swallow
         }
       });
-    } else if (typeof anyClient.on === 'function') {
+    } else if (typeof anyClientPre.on === 'function') {
       // SDK may surface a generic 'notification' event
-      anyClient.on('notification', (n: any) => {
+      anyClientPre.on('notification', (n: any) => {
         try {
           if (n && n.method === 'gemini/statusSnapshot') {
             latestStatusSnapshot = n.params;
@@ -152,6 +150,26 @@ export async function getMcpClient(cfg: any) {
     }
   } catch {
     // best-effort: do not block client.connect on notification wiring
+  }
+
+  logger.info('mcpClient: connecting to server...');
+  await client.connect(transport);
+  logger.info('mcpClient: connected to server');
+  // Attach transport stdout/stderr listeners after connect so underlying
+  // streams are available. Provide a clear diagnostic log when listeners
+  // are attached so we can verify piping succeeded.
+  try {
+    if (tAny.stdout && typeof tAny.stdout.on === 'function') {
+      tAny.stdout.on('data', (c: any) => forwardServerOutput(c, 'info'));
+    }
+    if (tAny.stderr && typeof tAny.stderr.on === 'function') {
+      tAny.stderr.on('data', (c: any) => forwardServerOutput(c, 'warn'));
+      logger.info('mcpClient: stderr listener attached');
+    } else {
+      logger.warn('mcpClient: transport.stderr not available; server logs may be missing');
+    }
+  } catch (e) {
+    logger.warn('mcpClient: failed to attach transport stdio listeners', String(e));
   }
   // Install outgoing-message capture depending on configured capture mode.
   try {

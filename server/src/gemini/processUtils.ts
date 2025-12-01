@@ -1,4 +1,6 @@
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
+import { readTimeoutEnv } from '../core/utils.js';
+import { logger } from '../core/logger.js';
 
 export function terminateProcessTree(child: ChildProcess) {
     const pid = child.pid;
@@ -49,7 +51,8 @@ export function terminateProcessTree(child: ChildProcess) {
     }
 }
 
-export async function execGeminiCommand(command: string, spawnArgs: string[], timeoutMs = 10000) {
+export async function execGeminiCommand(command: string, spawnArgs: string[], timeoutMs?: number) {
+    const effectiveTimeout = typeof timeoutMs === 'number' ? timeoutMs : readTimeoutEnv('GEMINI_TIMEOUT_CLI', 10000);
     return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
         let triedShellFallback = false;
 
@@ -69,15 +72,29 @@ export async function execGeminiCommand(command: string, spawnArgs: string[], ti
                 stderr += chunk.toString();
             });
 
-            const timer = timeoutMs
+            const timer = effectiveTimeout > 0
                 ? setTimeout(() => {
                       try {
                           terminateProcessTree(child);
                       } catch (e) {
                           // ignore
                       }
+                      // Log partial output to aid diagnosis
+                      try {
+                          const headOut = stdout ? stdout.slice(0, 2000) : '';
+                          const headErr = stderr ? stderr.slice(0, 2000) : '';
+                          logger.warn('cli: invocation timed out', {
+                              timeoutMs: effectiveTimeout,
+                              command: cmd,
+                              args,
+                              stdout: headOut,
+                              stderr: headErr
+                          });
+                      } catch (e) {
+                          // ignore logging errors
+                      }
                       reject(new Error('Timed out during Gemini CLI health check.'));
-                  }, timeoutMs)
+                  }, effectiveTimeout)
                 : undefined;
 
             const cleanupAndResolve = () => {
