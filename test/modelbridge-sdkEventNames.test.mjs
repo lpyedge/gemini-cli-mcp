@@ -83,11 +83,15 @@ for (const [idx, evName] of EVENT_NAMES.entries()) {
     function makeRequire() {
       const baseRequire = createRequire(srcPath);
       return function (id) {
+        if (id === 'vscode') {
+          return { workspace: { workspaceFolders: [] }, Disposable: class {}, window: {} };
+        }
         if (typeof id === 'string' && id.startsWith('node:')) {
           try { const core = baseRequire(id.slice(5)); return { default: core }; } catch (e) { }
         }
         if (id === './mcpClient' || id === '../extension/mcpClient') return fakeMcpClientModule;
         if (id === './configUtils' || id === '../extension/configUtils') return fakeConfigModule;
+        if (id === './logger' || id === '../extension/logger') return { logger: { info: (m, o) => fakeOutput.appendLine(String(m) + (o ? ' ' + JSON.stringify(o) : '')), warn: (m, o) => fakeOutput.appendLine(String(m) + (o ? ' ' + JSON.stringify(o) : '')) } };
         if (id === './orchestrator' || id === '../extension/orchestrator') return { runOrchestrator: async () => ({ success: true }) };
         if (id === './types' || id === '../extension/types') return {};
         return baseRequire(id);

@@ -334,8 +334,28 @@ export function activate(context: vscode.ExtensionContext) {
 		logger.info(`Gemini MCP: providerEmitter fired (${providerTriggerCount} times)`);
 	});
 	// NOTE: providerEmitter should not be fired in tight loops; keep change handling scoped to UI/diagnostics.
+	// Watch workspace folder changes. Only publish provider/start server when
+	// a workspace folder exists to avoid spawning servers for empty windows.
+	let embeddedClientStarted = false;
 	const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+		// Always refresh provider definitions when workspace changes
 		providerEmitter.fire();
+		// If a workspace folder has been added and embedded client not started,
+		// attempt to start the embedded MCP client (non-blocking).
+		const hasWorkspace = Array.isArray(vscode.workspace.workspaceFolders) && vscode.workspace.workspaceFolders.length > 0;
+		if (hasWorkspace && !embeddedClientStarted) {
+			embeddedClientStarted = true;
+			(async () => {
+				try {
+					const cfg = readConfig();
+					logger.info('Gemini MCP: initiating embedded server via getMcpClient (workspace change)');
+					await mcpClientModule.getMcpClient(cfg);
+					logger.info('Gemini MCP: getMcpClient resolved (server spawn attempted)');
+				} catch (err) {
+					logger.warn('Gemini MCP: getMcpClient failed to start server (workspace change)', String(err));
+				}
+			})();
+		}
 	});
 	context.subscriptions.push(workspaceWatcher);
 
@@ -383,10 +403,16 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	if (providerRegistered) {
-		setTimeout(() => {
-			logger.info('Gemini MCP: firing providerEmitter to publish initial MCP definitions.');
-			providerEmitter.fire();
-		}, 0);
+		// Only publish provider definitions immediately if a workspace is open.
+		const hasWorkspace = Array.isArray(vscode.workspace.workspaceFolders) && vscode.workspace.workspaceFolders.length > 0;
+		if (hasWorkspace) {
+			setTimeout(() => {
+				logger.info('Gemini MCP: firing providerEmitter to publish initial MCP definitions.');
+				providerEmitter.fire();
+			}, 0);
+		} else {
+			logger.info('Gemini MCP: no workspace open at activation; deferring provider publication until workspace is opened.');
+		}
 	}
 
 	const configWatcher = vscode.workspace.onDidChangeConfiguration((event) => {
@@ -419,18 +445,26 @@ export function activate(context: vscode.ExtensionContext) {
 	// the child server process is launched and that extension-side logging
 	// will capture its stdout/stderr. This is non-blocking and will not
 	// prevent activation if it fails.
-	setTimeout(() => {
-		(async () => {
-			try {
-				const cfg = readConfig();
-				logger.info('Gemini MCP: initiating embedded server via getMcpClient');
-				await mcpClientModule.getMcpClient(cfg);
-				logger.info('Gemini MCP: getMcpClient resolved (server spawn attempted)');
-			} catch (err) {
-				logger.warn('Gemini MCP: getMcpClient failed to start server', String(err));
-			}
-		})();
-	}, 500);
+	// Start embedded client only if workspace is open. Defer otherwise until the
+	// workspace watcher notices folders being added. This prevents spawning the
+	// server in empty Extension Development Host windows or when no workspace.
+	const initialHasWorkspace = Array.isArray(vscode.workspace.workspaceFolders) && vscode.workspace.workspaceFolders.length > 0;
+	if (initialHasWorkspace) {
+		setTimeout(() => {
+			(async () => {
+				try {
+					const cfg = readConfig();
+					logger.info('Gemini MCP: initiating embedded server via getMcpClient');
+					await mcpClientModule.getMcpClient(cfg);
+					logger.info('Gemini MCP: getMcpClient resolved (server spawn attempted)');
+				} catch (err) {
+					logger.warn('Gemini MCP: getMcpClient failed to start server', String(err));
+				}
+			})();
+		}, 500);
+	} else {
+		logger.info('Gemini MCP: deferring embedded server start until workspace is available.');
+	}
 
 	    const showStatusCmd = vscode.commands.registerCommand('geminiMcp.showStatus', async () => {
 		    const cfg = readConfig();

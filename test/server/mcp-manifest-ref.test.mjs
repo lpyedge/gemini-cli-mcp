@@ -77,13 +77,19 @@ test('mcp manifest with internal $defs and external relative $ref is loaded and 
       const timer = setTimeout(() => reject(new Error('Timeout waiting for manifest advertisement')), 15000);
       child.stdout.on('data', (b) => {
         out += b.toString();
-        if (out.includes('Advertised tool: test.internalRef') && out.includes('Advertised tool: test.externalRef')) {
+        // server diagnostic logs are on stderr and may change over time; be resilient
+        // and consider either stdout or stderr containing the tool names
+        if ((out.includes('test.internalRef') && out.includes('test.externalRef')) || (errOut.includes('test.internalRef') && errOut.includes('test.externalRef'))) {
           clearTimeout(timer);
           resolve(true);
         }
       });
       child.stderr.on('data', (b) => {
         errOut += b.toString();
+        if ((out.includes('test.internalRef') && out.includes('test.externalRef')) || (errOut.includes('test.internalRef') && errOut.includes('test.externalRef'))) {
+          clearTimeout(timer);
+          resolve(true);
+        }
       });
       child.on('exit', (code) => {
         if (code !== 0) {

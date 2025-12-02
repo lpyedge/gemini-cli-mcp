@@ -54,6 +54,7 @@ test('ModelBridge should log bridge req id and sdk message id when call-tool inv
   function makeRequire() {
     const baseRequire = createRequire(srcPath);
     return function (id) {
+      if (id === 'vscode') return { workspace: { workspaceFolders: [] }, Disposable: class {}, window: {} };
       if (typeof id === 'string' && id.startsWith('node:')) {
         // TypeScript transpiled imports like `import os from 'node:os'` expect a
         // `{ default: <module> }` shape. Provide that.
@@ -66,6 +67,7 @@ test('ModelBridge should log bridge req id and sdk message id when call-tool inv
       }
       if (id === './mcpClient' || id === '../extension/mcpClient') return fakeMcpClientModule;
       if (id === './configUtils' || id === '../extension/configUtils') return fakeConfigModule;
+      if (id === './logger' || id === '../extension/logger') return { logger: { info: (m, o) => fakeOutput.appendLine(String(m) + (o ? ' ' + JSON.stringify(o) : '')), warn: (m, o) => fakeOutput.appendLine(String(m) + (o ? ' ' + JSON.stringify(o) : '')) } };
       if (id === './orchestrator' || id === '../extension/orchestrator') return { runOrchestrator: async () => ({ success: true }) };
       if (id === './types' || id === '../extension/types') return {};
       return baseRequire(id);

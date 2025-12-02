@@ -6,6 +6,8 @@ import { logger } from './logger';
 import { resolveTaskCwd } from './configUtils';
 
 let cached: { client: any; transport: any } | undefined;
+// Guard concurrent creation so multiple callers don't spawn multiple servers
+let creatingPromise: Promise<{ client: any; transport: any }> | undefined;
 let latestStatusSnapshot: any | undefined = undefined;
 const statusListeners = new Set<(s: any) => void>();
 
@@ -36,6 +38,8 @@ function sanitizeEnv(rawEnv: NodeJS.ProcessEnv) {
 
 export async function getMcpClient(cfg: any) {
   if (cached) return cached;
+  if (creatingPromise) return await creatingPromise;
+  creatingPromise = (async () => {
   // Dynamically import the SDK at runtime so tests and ESM loaders do not
   // encounter synchronous CJS require() cycles. The SDK is published as
   // dual-mode; dynamic import keeps runtime loading strategy flexible.
@@ -44,7 +48,7 @@ export async function getMcpClient(cfg: any) {
   // resolution in this repo may not resolve the SDK's ESM typing under the
   // current settings, so ignore the typecheck for this dynamic import.
   // @ts-ignore - dynamic import resolved at runtime
-  const sdkClientMod: any = await import('@modelcontextprotocol/sdk/client');
+    const sdkClientMod: any = await import('@modelcontextprotocol/sdk/client');
   const Client: any = (sdkClientMod as any).Client || (sdkClientMod as any).default;
   // Stdio transport may be exported from a separate entrypoint; attempt to
   // import it explicitly (fallback to the named export on the client module).
@@ -174,8 +178,11 @@ export async function getMcpClient(cfg: any) {
   } catch (err) {
     // 可選: 處理錯誤
   }
-  cached = { client, transport };
-  return cached;
+    cached = { client, transport };
+    creatingPromise = undefined;
+    return cached;
+  })();
+  return await creatingPromise;
 }
 
 export async function closeMcpClient() {
