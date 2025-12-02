@@ -1,6 +1,4 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
-import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
@@ -9,8 +7,9 @@ import { jsonSchemaToZod, dereferenceSchema } from '../lib/schemaUtils.js';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WorkerPool } from '../task/workerPool.js';
-import { getDetectedGeminiPath, GeminiProvider, getGeminiProvider, GeminiHealthResult, GeminiMode } from '../gemini/geminiProvider.js';
+import { GeminiProvider, GeminiMode } from '../gemini/geminiProvider.js';
 import { SILENT_EXEC_PROMPT, serializeErrorForClient, formatWorkspaceError, normalizeForComparison, resolveWorkspaceRoot, readTimeoutEnv } from '../core/utils.js';
+import { loadMcpManifest as loadMcpManifestFromManager } from '../gemini/manifestManager.js';
 import { createPersistenceManager } from '../task/persistenceManager.js';
 import { logger } from '../core/logger.js';
 // gemini provider exports are imported above; no re-exports needed here
@@ -32,8 +31,7 @@ const stateDir = path.join(workspaceRoot, '.vscode', 'gemini-mcp');
 const logDir = path.join(stateDir, 'logs');
 const stateFile = path.join(stateDir, 'tasks.json');
 const statusFile = path.join(stateDir, 'status.json');
-const lockFile = path.join(stateDir, 'server.lock');
-let lockHeld = false;
+// lock file logic removed: lock management is not used by this server.
 const maxQueueSize = Math.max(1, Number(process.env.GEMINI_MAX_QUEUE || '200'));
 const retentionMs = 7 * 24 * 60 * 60 * 1000;
 const workspaceRootFingerprint = normalizeForComparison(workspaceRoot);
@@ -149,51 +147,41 @@ async function broadcastStatusSnapshot() {
     }
 }
 
-// Subscribe to task and pool events to propagate live status snapshots to clients.
-try {
-    taskEvents.on('update', () => {
-        try {
-            void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
-        } catch {}
-    });
-    if (typeof pool.on === 'function') {
-        pool.on('changed', () => {
-            try {
-                void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
-            } catch {}
-        });
-        pool.on('queue', () => {
-            try {
-                void persistence.persistLiveStatus().then(() => broadcastStatusSnapshot()).catch(() => {});
-            } catch {}
-        });
+async function persistAndBroadcastStatus() {
+    try {
+        await persistence.persistLiveStatus();
+    } catch (e) {
+        try { logger.warn('server: failed to persist live status', String(e)); } catch {}
     }
+    try {
+        await broadcastStatusSnapshot();
+    } catch (e) {
+        try { logger.warn('server: failed to broadcast status snapshot', String(e)); } catch {}
+    }
+}
+
+// Subscribe to task and pool events to propagate live status snapshots to clients.
+    try {
+        taskEvents.on('update', () => {
+            try {
+                void persistAndBroadcastStatus();
+            } catch {}
+        });
+        if (typeof pool.on === 'function') {
+            pool.on('changed', () => {
+                try {
+                    void persistAndBroadcastStatus();
+                } catch {}
+            });
+            pool.on('queue', () => {
+                try {
+                    void persistAndBroadcastStatus();
+                } catch {}
+            });
+        }
 } catch {
     // best-effort: do not crash if subscriptions fail
 }
-
-const manifestSchema = z
-    .object({
-        version: z.string().optional(),
-        name: z.string().optional(),
-        description: z.string().optional(),
-        tools: z
-            .array(
-                z
-                    .object({
-                        name: z.string().trim().min(1, 'Tool name is required'),
-                        title: z.string().optional(),
-                        description: z.string().optional(),
-                        arguments: z.unknown().optional(),
-                        returns: z.unknown().optional(),
-                        metadata: z.record(z.unknown()).optional()
-                    })
-                    .passthrough()
-            )
-            .optional(),
-        resources: z.array(z.unknown()).optional()
-    })
-    .passthrough();
 
 const logTemplate = new ResourceTemplate('tasks://{id}/log', {
     list: async () => ({
@@ -498,7 +486,6 @@ async function handleShutdown(reason: string) {
     }
     shuttingDown = true;
     try {
-        stopCliHealthWatcher();
         pool.cancelAll();
         for (const task of tasks.values()) {
             if (!completedStatuses.includes(task.status)) {
@@ -507,79 +494,13 @@ async function handleShutdown(reason: string) {
             }
         }
         await persistence.flushPendingPersistence();
-        // Release any acquired state lock so other server instances can start.
-        try {
-            await releaseStateLock();
-        } catch (err) {
-            // best-effort: log and continue
-            logger.error('server: failed to release state lock', String(err));
-        }
+        // No state lock to release in current implementation.
     } catch (error) {
         logger.error('server: failed to flush tasks during shutdown', String(error));
     }
 }
 
-async function acquireStateLock() {
-    // Ensure state directory exists before attempting lock file operations.
-    await fs.mkdir(stateDir, { recursive: true });
-    try {
-        const raw = await fs.readFile(lockFile, 'utf8').catch(() => undefined);
-        if (raw) {
-            let parsed: any = undefined;
-            try {
-                parsed = JSON.parse(raw);
-            } catch {
-                // malformed lock, remove and continue
-                await fs.unlink(lockFile).catch(() => {});
-            }
-            if (parsed && parsed.pid) {
-                const other = Number(parsed.pid);
-                if (Number.isFinite(other) && other > 0) {
-                    try {
-                        process.kill(other, 0);
-                        throw new Error(`State directory locked by running process ${other}`);
-                    } catch (err: any) {
-                        if (err && err.code === 'ESRCH') {
-                            // process not found; stale lock - remove and continue
-                            await fs.unlink(lockFile).catch(() => {});
-                        } else if (err && err.message && err.message.startsWith('State directory locked')) {
-                            throw err;
-                        } else {
-                            // On Windows or permission issues, treat as locked
-                            throw new Error(`State directory appears locked by PID ${other}`);
-                        }
-                    }
-                }
-            }
-        }
-        await fs.writeFile(lockFile, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), 'utf8');
-        lockHeld = true;
-    } catch (err) {
-        throw err;
-    }
-}
-
-async function releaseStateLock() {
-    if (!lockHeld) {
-        return;
-    }
-    try {
-        const raw = await fs.readFile(lockFile, 'utf8').catch(() => undefined);
-        if (raw) {
-            try {
-                const parsed = JSON.parse(raw);
-                if (parsed && parsed.pid === process.pid) {
-                    await fs.unlink(lockFile).catch(() => {});
-                }
-            } catch {
-                // malformed: ensure removal
-                await fs.unlink(lockFile).catch(() => {});
-            }
-        }
-    } finally {
-        lockHeld = false;
-    }
-}
+// State lock management removed — not used in this build.
 
 function registerShutdownHandlers() {
     const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
@@ -594,22 +515,7 @@ function registerShutdownHandlers() {
 }
 
 // `formatWorkspaceError` moved to `server/src/core/utils.ts`
-
-async function validateGeminiExecutable() {
-    // If provider detected an explicit gemini path, validate it.
-    try {
-        const detected = getDetectedGeminiPath();
-        if (detected && detected.includes(path.sep)) {
-            await fs.access(detected);
-        }
-    } catch {
-        throw new Error(`Gemini CLI not found at detected path`);
-    }
-}
-
-// spawnHelpers provides gemini resolution and spawn command helpers
-
-// execGeminiCommand moved to server/src/gemini/processUtils.ts
+// Validation of gemini executable is delegated to GeminiProvider.checkHealth().
 
 async function updateCliStatus(reason: string) {
     if (cliCheckPromise) {
@@ -646,10 +552,9 @@ async function updateCliStatus(reason: string) {
                 // Immediately persist & broadcast the updated status so clients
                 // see the new state as soon as possible.
                 try {
-                    await persistence.persistLiveStatus();
-                    try { await broadcastStatusSnapshot(); } catch (e) { logger.warn('server: failed to broadcast status after health check', String(e)); }
+                    await persistAndBroadcastStatus();
                 } catch (e) {
-                    logger.warn('server: failed to persist status after health check', String(e));
+                    logger.warn('server: failed to persist/broadcast status after health check', String(e));
                 }
             } else {
                 // Neither core nor CLI available
@@ -662,10 +567,9 @@ async function updateCliStatus(reason: string) {
                 enterCliFailure('missing', `${message} [${reason}]`, { force: true });
                 // Ensure clients are notified of failure state promptly
                 try {
-                    await persistence.persistLiveStatus();
-                    try { await broadcastStatusSnapshot(); } catch (e) { logger.warn('server: failed to broadcast status after failure', String(e)); }
+                    await persistAndBroadcastStatus();
                 } catch (e) {
-                    logger.warn('server: failed to persist failure status', String(e));
+                    logger.warn('server: failed to persist/broadcast failure status', String(e));
                 }
             }
         } catch (error) {
@@ -730,9 +634,7 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
         acceptingTasks = false;
         cliStatus = { state, message, lastChecked: Date.now() };
         persistence.scheduleStatusSnapshot();
-        void persistence.persistLiveStatus().then(() => {
-            try { void broadcastStatusSnapshot(); } catch {}
-        }).catch(() => {});
+        void persistAndBroadcastStatus();
         return;
     }
 
@@ -750,9 +652,7 @@ function enterCliFailure(state: CliHealthState, message: string, options?: { for
         }
     }
     persistence.scheduleStatusSnapshot();
-    void persistence.persistLiveStatus().then(() => {
-        try { void broadcastStatusSnapshot(); } catch {}
-    }).catch(() => {});
+    void persistAndBroadcastStatus();
 }
 
 function maybeUpdateCliStatusFromFailure(message: string) {
@@ -773,13 +673,7 @@ function ensureCliReady() {
     );
 }
 
-function startCliHealthWatcher() {
-    // Disable periodic polling to avoid hammering gemini --version.
-}
-
-function stopCliHealthWatcher() {
-    // Nothing to stop; watcher is disabled.
-}
+// CLI health watcher removed; health is managed by GeminiProvider.checkHealth().
 
 // `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/core/utils.ts`
 
@@ -801,7 +695,7 @@ async function start() {
     // Load and register tool metadata from mcp.json (manifest) before connecting
     // the transport so tool capabilities can be registered without error.
     try {
-        await loadMcpManifest();
+        await loadMcpManifestFromManager({ workspaceRoot, server, runGeminiCliCommand, ensureCliReady, manifestToolTimeoutMs });
     } catch (err) {
         logger.warn('server: failed to load MCP manifest (continuing startup)', String(err));
     }
@@ -831,14 +725,9 @@ async function start() {
         };
         logger.info('server: broadcasting preliminary CLI checking snapshot');
         try {
-            await persistence.persistLiveStatus();
+            await persistAndBroadcastStatus();
         } catch (e) {
-            logger.warn('server: failed to persist preliminary status', String(e));
-        }
-        try {
-            await broadcastStatusSnapshot();
-        } catch (e) {
-            logger.warn('server: failed to broadcast preliminary status snapshot', String(e));
+            logger.warn('server: failed to persist/broadcast preliminary status', String(e));
         }
     } catch {
         // ignore failures here - proceed with background init
@@ -852,33 +741,18 @@ async function start() {
     // Run background initialization tasks without blocking server startup.
     (async function postStartWork() {
         try {
-            // Validate gemini executable and perform initial CLI health check.
-            try {
-                await validateGeminiExecutable();
-            } catch (err) {
-                logger.warn('server: gemini validation failed (continuing startup)', String(err));
-            }
-
             try {
                 await updateCliStatus('startup');
             } catch (err) {
                 logger.warn('server: initial CLI health check failed (continuing startup)', String(err));
             }
 
-            // Persist discovered gemini path if present (best-effort)
+            // Load persisted tasks; manifest is loaded prior to transport connect
             try {
-                await persistDiscoveredGeminiPathIfMissing();
+                await persistence.loadPersistedTasks();
             } catch (err) {
-                logger.warn('server: failed to persist discovered gemini path', String(err));
+                logger.warn('server: failed to load persisted tasks', String(err));
             }
-
-
-                    // Load persisted tasks; manifest is loaded prior to transport connect
-                    try {
-                        await persistence.loadPersistedTasks();
-                    } catch (err) {
-                        logger.warn('server: failed to load persisted tasks', String(err));
-                    }
 
             try {
                 await persistence.pruneOldTasks();
@@ -887,16 +761,9 @@ async function start() {
             }
 
             try {
-                await persistence.persistLiveStatus();
+                await persistAndBroadcastStatus();
             } catch (err) {
-                logger.warn('server: persistLiveStatus failed', String(err));
-            }
-
-            // Start any periodic/long-running watchers (no-op by default)
-            try {
-                startCliHealthWatcher();
-            } catch (err) {
-                logger.warn('server: startCliHealthWatcher failed', String(err));
+                logger.warn('server: persistAndBroadcastStatus failed', String(err));
             }
 
             // After background init, broadcast an updated snapshot so extensions
@@ -913,301 +780,8 @@ async function start() {
     })();
 }
 
-async function persistDiscoveredGeminiPathIfMissing() {
-    try {
-        // Only persist when provider has detected an explicit path (contains path separator)
-        const bin = getDetectedGeminiPath();
-        if (!bin || !bin.includes(path.sep)) {
-            return;
-        }
-        // Ensure state directory exists
-        await fs.mkdir(stateDir, { recursive: true });
-        // Read existing status file if present
-        let raw: string | undefined;
-        try {
-            raw = await fs.readFile(statusFile, 'utf8');
-        } catch {
-            raw = undefined;
-        }
-        let parsed: any = {};
-        if (raw) {
-            try {
-                parsed = JSON.parse(raw) as any;
-            } catch {
-                parsed = {};
-            }
-        }
-        const existing = parsed && (parsed.geminiPath || parsed.gemini || parsed.cliPath);
-        if (existing && String(existing).trim().length > 0) {
-            // already persisted
-            return;
-        }
-        parsed.geminiPath = String(bin);
-        parsed.updatedAt = Date.now();
-        await fs.writeFile(statusFile, JSON.stringify(parsed, null, 2), 'utf8');
-        logger.info('server: persisted discovered gemini path', {
-            statusFile,
-            geminiPath: String(bin)
-        });
-    } catch (err) {
-        // best-effort; do not fail startup
-        logger.warn('server: persistDiscoveredGeminiPathIfMissing failed', String(err));
-    }
-}
-
-async function loadMcpManifest() {
-    try {
-        const manifestPath = path.join(workspaceRoot, 'mcp.json');
-        if (!(await fileExists(manifestPath))) {
-            // No manifest present; nothing to do
-            logger.info('manifest: not found', { manifestPath });
-            return;
-        }
-        const raw = await fs.readFile(manifestPath, 'utf8');
-        const manifest = JSON.parse(raw) as any;
-        const manifestValidation = manifestSchema.safeParse(manifest);
-        if (!manifestValidation.success) {
-            logger.error('manifest: validation failed; proceeding with raw manifest', {
-                issues: manifestValidation.error.issues
-            });
-        }
-        const manifestData = manifestValidation.success ? manifestValidation.data : manifest;
-        const toolEntries = Array.isArray(manifestData.tools) ? manifestData.tools : [];
-        logger.info('manifest: loaded', { toolCount: toolEntries.length });
-        // Attach manifest to server for inspection by clients if needed
-        try {
-            (server as any)._mcpManifest = manifestData;
-        } catch { /* ignore */ }
-
-        const manifestDir = path.dirname(manifestPath);
-        const externalCache: Record<string, any> = {};
-        const advertisedTools: string[] = [];
-        for (const t of toolEntries) {
-            try {
-                if (!t || typeof t !== 'object') {
-                    logger.warn('manifest: skipping entry with invalid structure', { entry: t });
-                    continue;
-                }
-                if (typeof t.name !== 'string' || t.name.trim().length === 0) {
-                    logger.warn('manifest: skipping entry without a valid name', { entry: t });
-                    continue;
-                }
-                const toolName = t.name.trim();
-                // If server exposes a hasTool method or internal tools map, try to detect pre-existing registration
-                const hasTool = (server as any).hasTool?.(toolName) ?? Boolean((server as any)._tools && (server as any)._tools[toolName]);
-                if (hasTool) {
-                    // already registered by code; skip
-                    continue;
-                }
-
-                let resolvedArgs: any = undefined;
-                try {
-                    if (t.arguments) {
-                        resolvedArgs = await dereferenceSchema(t.arguments, manifestData, manifestDir, externalCache);
-                    }
-                } catch (refErr) {
-                    logger.warn('manifest: failed to dereference schema', {
-                        toolName,
-                        error: String(refErr)
-                    });
-                    resolvedArgs = t.arguments;
-                }
-                const inputSchemaZod = resolvedArgs ? jsonSchemaToZod(resolvedArgs) : z.any().optional();
-
-                try {
-                    server.registerTool(
-                        toolName,
-                        {
-                            title: t.title ?? toolName,
-                            description: t.description ?? '',
-                            inputSchema: inputSchemaZod
-                        },
-                        async (input, _extra) => {
-                            try {
-                                ensureCliReady();
-                                const normalized = sanitizeManifestArgs(toolName, input ?? {});
-                                const result = await invokeManifestTool(toolName, normalized);
-                                return textResponse(result);
-                            } catch (err) {
-                                return textResponse({ error: serializeErrorForClient(err) });
-                            }
-                        }
-                    );
-                        logger.info('manifest: registered tool', { toolName });
-                        // Also emit a clear, human-readable single-line message per tool
-                        try {
-                            const title = (t.title && String(t.title).trim().length > 0) ? String(t.title) : undefined;
-                            const desc = (t.description && String(t.description).trim().length > 0) ? String(t.description) : undefined;
-                            const extra = title ? ` title="${title}"` : '';
-                            const extraDesc = desc ? ` description="${desc}"` : '';
-                            logger.info(`manifest: tool registered: ${toolName}${extra}${extraDesc}`);
-                        } catch {
-                            // ignore logging formatting errors
-                        }
-                    advertisedTools.push(toolName);
-                } catch (regErr: any) {
-                    const msg = String((regErr && regErr.message) || regErr);
-                    if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
-                        logger.info('manifest: skipped duplicate tool', { toolName });
-                    } else {
-                        logger.warn('manifest: failed to register tool', {
-                            toolName,
-                            error: String(regErr)
-                        });
-                    }
-                }
-            } catch (err) {
-                const fallbackName = (t && typeof t === 'object' && 'name' in t) ? (t as any).name : '<unknown>';
-                logger.warn('manifest: failed to register tool', {
-                    toolName: fallbackName,
-                    error: String(err)
-                });
-            }
-        }
-        if (advertisedTools.length > 0) {
-            logger.info('manifest: tools available', { tools: advertisedTools });
-        } else {
-            logger.warn('manifest: no tools registered from manifest');
-        }
-    } catch (err) {
-        logger.error('manifest: failed to load mcp.json', String(err));
-    }
-}
-
-type ManifestInvocationAttempt = {
-    label: string;
-    args: string[];
-    stdin?: string;
-    timeoutMs?: number;
-};
-
-function sanitizeManifestArgs(toolName: string, rawInput: Record<string, unknown>) {
-    const input: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(rawInput ?? {})) {
-        if (value === undefined || value === null) {
-            continue;
-        }
-        input[key] = value;
-    }
-
-    if (toolName === 'dev.summarizeCode') {
-        const inputType = typeof input.inputType === 'string' ? String(input.inputType) : 'path';
-        input.inputType = inputType;
-        if (inputType === 'path') {
-            const relPath = typeof input.path === 'string' ? input.path : undefined;
-            if (!relPath) {
-                throw new Error('`path` is required when `inputType` is `path`.');
-            }
-            try {
-                input.path = resolveWorkspacePath(relPath);
-            } catch {
-                input.path = path.resolve(workspaceRoot, relPath);
-            }
-            delete input.content;
-        } else if (inputType === 'text') {
-            if (typeof input.content !== 'string' || input.content.trim().length === 0) {
-                throw new Error('`content` must be provided when `inputType` is `text`.');
-            }
-            delete input.path;
-        }
-    } else if (typeof input.path === 'string') {
-        try {
-            input.path = resolveWorkspacePath(String(input.path));
-        } catch {
-            input.path = path.resolve(workspaceRoot, String(input.path));
-        }
-    }
-
-    return input;
-}
-
-function toKebabCase(value: string) {
-    return value
-        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-        .replace(/[_\s]+/g, '-')
-        .toLowerCase();
-}
-
-function stripUndefinedDeep(obj: Record<string, unknown>) {
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-        if (value === undefined || value === null) {
-            continue;
-        }
-        if (Array.isArray(value)) {
-            out[key] = value
-                .map((entry) => (typeof entry === 'object' && entry !== null ? stripUndefinedDeep(entry as Record<string, unknown>) : entry))
-                .filter((entry) => entry !== undefined && entry !== null);
-            continue;
-        }
-        if (typeof value === 'object') {
-            out[key] = stripUndefinedDeep(value as Record<string, unknown>);
-            continue;
-        }
-        out[key] = value;
-    }
-    return out;
-}
-
-function manifestArgsToFlags(args: Record<string, unknown>) {
-    const flags: string[] = [];
-    for (const [key, value] of Object.entries(args)) {
-        if (value === undefined || value === null) {
-            continue;
-        }
-        if (key === 'content' && typeof value === 'string') {
-            // Large free-form content should be delivered via stdin JSON instead of CLI flags.
-            continue;
-        }
-        const flagName = `--${toKebabCase(key)}`;
-        if (Array.isArray(value)) {
-            for (const entry of value) {
-                if (entry === undefined || entry === null) {
-                    continue;
-                }
-                flags.push(flagName, String(entry));
-            }
-            continue;
-        }
-        if (typeof value === 'object') {
-            flags.push(flagName, JSON.stringify(value));
-            continue;
-        }
-        flags.push(flagName, String(value));
-    }
-    return flags;
-}
-
-function buildManifestInvocationAttempts(toolName: string, args: Record<string, unknown>): ManifestInvocationAttempt[] {
-    const sanitized = stripUndefinedDeep(args);
-    const jsonPayload = JSON.stringify({ tool: toolName, arguments: sanitized }, null, 2);
-    const attempts: ManifestInvocationAttempt[] = [
-        {
-            label: 'mcp.call',
-            args: ['mcp', 'call', toolName],
-            stdin: jsonPayload,
-            timeoutMs: manifestToolTimeoutMs
-        }
-    ];
-
-    const segments = toolName.split('.');
-    if (segments.length >= 2) {
-        const category = segments[0];
-        const action = segments
-            .slice(1)
-            .map((segment) => toKebabCase(segment))
-            .join('-');
-        const flagArgs = manifestArgsToFlags(sanitized);
-        attempts.push({
-            label: 'category-command',
-            args: [category, action, ...flagArgs],
-            stdin: JSON.stringify(sanitized, null, 2),
-            timeoutMs: manifestToolTimeoutMs
-        });
-    }
-
-    return attempts;
-}
+// Persistence of discovered geminiPath is handled by GeminiProvider or persistence
+// layer; server no longer performs direct discovered-path persistence here.
 
 async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: string; timeoutMs?: number } = {}) {
     // Delegate to GeminiProvider which centralizes CLI spawn behavior
@@ -1215,54 +789,6 @@ async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: str
     const payload = `${SILENT_EXEC_PROMPT}\n${options.stdin ?? ''}`;
     const res = await provider.runCliCommand(commandArgs, { cwd: workspaceRoot, env: undefined, stdin: payload, timeoutMs: options.timeoutMs });
     return { stdout: res.stdout, stderr: res.stderr };
-}
-
-async function invokeManifestTool(toolName: string, args: Record<string, unknown>) {
-    const attempts = buildManifestInvocationAttempts(toolName, args);
-    const errors: string[] = [];
-    for (const attempt of attempts) {
-        try {
-            logger.info('manifest: invoking tool', {
-                toolName,
-                attempt: attempt.label,
-                args: attempt.args,
-                stdinBytes: attempt.stdin ? attempt.stdin.length : 0
-            });
-            const { stdout } = await runGeminiCliCommand(attempt.args, { stdin: attempt.stdin, timeoutMs: attempt.timeoutMs });
-            const trimmed = stdout.trim();
-            if (!trimmed) {
-                logger.warn('manifest: tool returned empty output', {
-                    toolName,
-                    attempt: attempt.label
-                });
-                errors.push(`${attempt.label}: empty output`);
-                continue;
-            }
-            try {
-                logger.info('manifest: tool produced JSON output', {
-                    toolName,
-                    attempt: attempt.label,
-                    bytes: Buffer.byteLength(trimmed, 'utf8')
-                });
-                return JSON.parse(trimmed);
-            } catch {
-                logger.info('manifest: tool produced text output', {
-                    toolName,
-                    attempt: attempt.label,
-                    bytes: Buffer.byteLength(trimmed, 'utf8')
-                });
-                return trimmed;
-            }
-        } catch (error) {
-            logger.warn('manifest: tool invocation failed', {
-                toolName,
-                attempt: attempt.label,
-                error: formatWorkspaceError(error)
-            });
-            errors.push(`${attempt.label}: ${formatWorkspaceError(error)}`);
-        }
-    }
-    throw new Error(errors.join('; '));
 }
 
 registerShutdownHandlers();
