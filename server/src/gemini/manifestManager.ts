@@ -3,7 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { jsonSchemaToZod, dereferenceSchema } from '../lib/schemaUtils.js';
 import { logger } from '../core/logger.js';
-import { serializeErrorForClient, formatWorkspaceError } from '../core/utils.js';
+import { serializeErrorForClient, formatWorkspaceError, normalizeForComparison } from '../core/utils.js';
 
 export type ManifestInvocationAttempt = {
     label: string;
@@ -258,37 +258,39 @@ function sanitizeManifestArgs(toolName: string, rawInput: Record<string, unknown
     if (toolName === 'dev.summarizeCode') {
         const inputType = typeof input.inputType === 'string' ? String(input.inputType) : 'path';
         input.inputType = inputType;
-        if (inputType === 'path') {
-            const relPath = typeof input.path === 'string' ? input.path : undefined;
-            if (!relPath) {
-                throw new Error('`path` is required when `inputType` is `path`.');
-            }
-            try {
+            if (inputType === 'path') {
+                const relPath = typeof input.path === 'string' ? input.path : undefined;
+                if (!relPath) {
+                    throw new Error('`path` is required when `inputType` is `path`.');
+                }
                 input.path = resolveWorkspacePath(relPath, workspaceRoot);
-            } catch {
-                input.path = path.resolve(workspaceRoot, relPath);
+                delete input.content;
+            } else if (inputType === 'text') {
+                if (typeof input.content !== 'string' || input.content.trim().length === 0) {
+                    throw new Error('`content` must be provided when `inputType` is `text`.');
+                }
+                delete input.path;
             }
-            delete input.content;
-        } else if (inputType === 'text') {
-            if (typeof input.content !== 'string' || input.content.trim().length === 0) {
-                throw new Error('`content` must be provided when `inputType` is `text`.');
-            }
-            delete input.path;
-        }
-    } else if (typeof input.path === 'string') {
-        try {
+        } else if (typeof input.path === 'string') {
             input.path = resolveWorkspacePath(String(input.path), workspaceRoot);
-        } catch {
-            input.path = path.resolve(workspaceRoot, String(input.path));
         }
-    }
 
     return input;
 }
 
 function resolveWorkspacePath(file: string, workspaceRoot: string) {
-    // Simplified resolution: delegate to path.resolve with workspaceRoot as base.
-    return path.resolve(workspaceRoot, file);
+    const resolved = path.resolve(workspaceRoot, file);
+    return assertPathWithinWorkspace(resolved, workspaceRoot);
+}
+
+function assertPathWithinWorkspace(target: string, workspaceRoot: string) {
+    const normalizedTarget = normalizeForComparison(path.normalize(target));
+    const normalizedRoot = normalizeForComparison(path.normalize(workspaceRoot));
+    const prefix = normalizedRoot.endsWith(path.sep) ? normalizedRoot : normalizedRoot + path.sep;
+    if (normalizedTarget === normalizedRoot || normalizedTarget.startsWith(prefix)) {
+        return path.normalize(target);
+    }
+    throw new Error('File path is outside the allowed workspace directory.');
 }
 
 async function invokeManifestTool(toolName: string, args: Record<string, unknown>, runGeminiCliCommand: (args: string[], opts?: { stdin?: string; timeoutMs?: number }) => Promise<{ stdout: string; stderr: string }>, manifestToolTimeoutMs: number) {

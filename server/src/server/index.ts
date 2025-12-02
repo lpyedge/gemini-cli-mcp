@@ -291,9 +291,6 @@ function readResourceText(text: string, taskId?: string) {
     };
 }
 
-// `jsonSchemaToZod` moved to `server/src/server/schemaUtils.ts`
-
-// `dereferenceSchema` moved to `server/src/server/schemaUtils.ts`
 
 function normalizeTemplateVariable(value?: string | string[]) {
     if (!value) {
@@ -301,9 +298,6 @@ function normalizeTemplateVariable(value?: string | string[]) {
     }
     return Array.isArray(value) ? value[0] : value;
 }
-
-// `tokenizeCommandLine` moved to `server/src/core/utils.ts`
-
 async function fileExists(target: string) {
     try {
         await fs.access(target);
@@ -408,11 +402,6 @@ function assertAllowedTaskCwd(target: string) {
     }
     throw new Error('Task working directory must be within workspace, user home, or system temp.');
 }
-
-// `normalizeForComparison` moved to `server/src/core/utils.ts`
-
-// `resolveWorkspaceRoot` moved to `server/src/core/utils.ts`
-
 async function ensureStateDirs() {
     await fs.mkdir(logDir, { recursive: true });
 }
@@ -475,11 +464,6 @@ async function updateLogLength(task: TaskRecord) {
         task.logLength = task.logLength ?? 0;
     }
 }
-
-// terminateProcessTree moved to server/src/gemini/processUtils.ts
-
-// Persistence responsibilities moved to `persistenceManager`
-
 async function handleShutdown(reason: string) {
     if (shuttingDown) {
         return;
@@ -673,9 +657,7 @@ function ensureCliReady() {
     );
 }
 
-// CLI health watcher removed; health is managed by GeminiProvider.checkHealth().
 
-// `readTimeoutEnv` and `readPriorityEnv` moved to `server/src/core/utils.ts`
 
 async function start() {
     logger.info('server: starting', {
@@ -787,8 +769,14 @@ async function runGeminiCliCommand(commandArgs: string[], options: { stdin?: str
     // Delegate to GeminiProvider which centralizes CLI spawn behavior
     const provider = getOrCreateGeminiProvider();
     const payload = `${SILENT_EXEC_PROMPT}\n${options.stdin ?? ''}`;
-    const res = await provider.runCliCommand(commandArgs, { cwd: workspaceRoot, env: undefined, stdin: payload, timeoutMs: options.timeoutMs });
-    return { stdout: res.stdout, stderr: res.stderr };
+    try {
+        const res = await provider.runCliCommand(commandArgs, { cwd: workspaceRoot, env: undefined, stdin: payload, timeoutMs: options.timeoutMs });
+        return { stdout: res.stdout, stderr: res.stderr };
+    } catch (err) {
+        // Propagate CLI failures to the status broadcaster so the extension can react.
+        maybeUpdateCliStatusFromFailure(formatWorkspaceError(err));
+        throw err;
+    }
 }
 
 registerShutdownHandlers();
