@@ -4,7 +4,7 @@
 export async function resolve(specifier, context, defaultResolve) {
   if (specifier === 'vscode') {
     return {
-      url: new URL('./helpers/vscodeMock.mjs', import.meta.url).href
+      url: new URL('./vscodeMock.mjs', import.meta.url).href
     };
   }
   return defaultResolve(specifier, context, defaultResolve);

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { createPersistenceManager } from '../../server/src/task/persistenceManager.ts';
 import { WorkerPool } from '../../server/src/task/workerPool.ts';
 
-import { readStatusFile, waitForTaskCompletion, waitForStatusFileExists } from './helpers/testHelpers.mjs';
+import { readStatusFile, waitForTaskCompletion, waitForStatusFileExists } from '../../test/support/testHelpers.mjs';
 
 const tmpRoot = path.join('test-temp', 'status-tests');
 

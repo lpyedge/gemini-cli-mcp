@@ -31,6 +31,6 @@ console.log('Running root tests (all tests under ./test)');
 // Use ts-node ESM loader so tests can import TypeScript sources directly.
 // Prepend a small loader that maps the 'vscode' specifier to our local mock.
 // We no longer use the CJS preload; the ESM loader-only approach will be used.
-run(process.execPath, ['--loader', './test/loader-vscode-mock.mjs', '--loader', 'ts-node/esm', '--test'], { env: process.env, cwd: repoRoot });
+  run(process.execPath, ['--loader', './test/support/loader-vscode-mock.mjs', '--loader', 'ts-node/esm', '--test'], { env: process.env, cwd: repoRoot });
 
 console.log('All tests passed.');
