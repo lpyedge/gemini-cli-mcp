@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
+import { z } from 'zod';
 import { logger } from './logger';
 
 import { resolveTaskCwd } from './configUtils';
@@ -119,37 +119,28 @@ export async function getMcpClient(cfg: any) {
   // to avoid a race where the server sends an initial snapshot during or
   // immediately after connect and the handler is not yet installed.
   try {
-    const anyClientPre: any = client;
-    if (typeof anyClientPre.onNotification === 'function') {
-      anyClientPre.onNotification('gemini/statusSnapshot', (params: any) => {
-        try {
-          latestStatusSnapshot = params;
-          logger.info('gemini: status snapshot received', params);
-          for (const l of Array.from(statusListeners)) {
-            try { l(params); } catch {}
+    const statusSnapshotNotificationSchema = z.object({
+      jsonrpc: z.literal('2.0').optional(),
+      method: z.literal('gemini/statusSnapshot'),
+      params: z.unknown()
+    });
+    client.setNotificationHandler(statusSnapshotNotificationSchema, (notification: { params: any }) => {
+      try {
+        latestStatusSnapshot = notification.params;
+        logger.info('gemini: status snapshot received', notification.params);
+        for (const listener of Array.from(statusListeners)) {
+          try {
+            listener(notification.params);
+          } catch {
+            /* ignore listener errors */
           }
-        } catch (e) {
-          // swallow
         }
-      });
-    } else if (typeof anyClientPre.on === 'function') {
-      // SDK may surface a generic 'notification' event
-      anyClientPre.on('notification', (n: any) => {
-        try {
-          if (n && n.method === 'gemini/statusSnapshot') {
-            latestStatusSnapshot = n.params;
-            logger.info('gemini: status snapshot received', n.params);
-            for (const l of Array.from(statusListeners)) {
-              try { l(n.params); } catch {}
-            }
-          }
-        } catch {
-          // ignore
-        }
-      });
-    }
+      } catch {
+        // ignore parsing/logging errors to keep handler robust
+      }
+    });
   } catch {
-    // best-effort: do not block client.connect on notification wiring
+    // best effort; do not block client.connect if registration fails
   }
 
   logger.info('mcpClient: connecting to server...');

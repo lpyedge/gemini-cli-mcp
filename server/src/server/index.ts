@@ -105,6 +105,9 @@ const server = new McpServer({
     name: 'gemini-cli-mcp',
     version: '0.2.0'
 });
+// Track the active transport so broadcasts can use it directly when SDK
+// doesn't expose a convenient send API on the McpServer instance.
+let activeTransport: any = null;
 
 // Build and send a live status snapshot to connected MCP clients (extension).
 async function broadcastStatusSnapshot() {
@@ -129,13 +132,11 @@ async function broadcastStatusSnapshot() {
                 anyServer.notification({ method: 'gemini/statusSnapshot', params: payload });
                 return;
             }
-            // Fallback: use transport.send if available
-            const transport = (anyServer as any)._transport;
-            if (transport && typeof transport.send === 'function') {
-                logger.info('server: using transport.send to publish gemini/statusSnapshot via transport');
-                // send a JSON-RPC notification
-                void transport.send({ jsonrpc: '2.0', method: 'gemini/statusSnapshot', params: payload }).catch((err: any) => {
-                    try { logger.warn('server: transport.send failed to deliver statusSnapshot', String(err)); } catch {}
+            // Fallback: use the tracked activeTransport if available
+            if (activeTransport && typeof activeTransport.send === 'function') {
+                logger.info('server: using activeTransport.send to publish gemini/statusSnapshot via transport');
+                void activeTransport.send({ jsonrpc: '2.0', method: 'gemini/statusSnapshot', params: payload }).catch((err: any) => {
+                    try { logger.warn('server: activeTransport.send failed to deliver statusSnapshot', String(err)); } catch {}
                 });
             } else {
                 logger.warn('server: no transport available to send status snapshot');
@@ -622,7 +623,12 @@ async function updateCliStatus(reason: string) {
             // Use GeminiProvider which tries core first, then CLI fallback
             const provider = getOrCreateGeminiProvider();
             const healthResult = await provider.checkHealth();
-            
+
+            // Log the raw health result for diagnostics and traceability
+            try {
+                logger.info('cli: health check result', { healthResult });
+            } catch {}
+
             if (healthResult.available) {
                 cliStatus = {
                     state: 'ok',
@@ -632,11 +638,19 @@ async function updateCliStatus(reason: string) {
                     mode: healthResult.mode
                 };
                 acceptingTasks = true;
-                logger.info('cli: ready', { 
+                logger.info('cli: ready', {
                     mode: healthResult.mode,
                     version: healthResult.version,
                     message: healthResult.message
                 });
+                // Immediately persist & broadcast the updated status so clients
+                // see the new state as soon as possible.
+                try {
+                    await persistence.persistLiveStatus();
+                    try { await broadcastStatusSnapshot(); } catch (e) { logger.warn('server: failed to broadcast status after health check', String(e)); }
+                } catch (e) {
+                    logger.warn('server: failed to persist status after health check', String(e));
+                }
             } else {
                 // Neither core nor CLI available
                 const message = healthResult.message;
@@ -646,6 +660,13 @@ async function updateCliStatus(reason: string) {
                     message
                 });
                 enterCliFailure('missing', `${message} [${reason}]`, { force: true });
+                // Ensure clients are notified of failure state promptly
+                try {
+                    await persistence.persistLiveStatus();
+                    try { await broadcastStatusSnapshot(); } catch (e) { logger.warn('server: failed to broadcast status after failure', String(e)); }
+                } catch (e) {
+                    logger.warn('server: failed to persist failure status', String(e));
+                }
             }
         } catch (error) {
             const message = formatWorkspaceError(error);
@@ -795,13 +816,32 @@ async function start() {
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    // Keep a reference to the transport for direct sends.
+    activeTransport = transport;
 
-    // Immediately send an initial (possibly empty) snapshot so clients know
-    // the server is alive even before heavier background tasks complete.
+    // Immediately publish a lightweight "checking" snapshot so the client
+    // knows the server is alive and that CLI health is being probed. This
+    // gives the extension a timely update to show a checking UI state.
     try {
-        void broadcastStatusSnapshot();
+        cliStatus = {
+            state: 'unknown',
+            message: 'Checking Gemini CLI...',
+            lastChecked: Date.now(),
+            mode: 'unknown'
+        };
+        logger.info('server: broadcasting preliminary CLI checking snapshot');
+        try {
+            await persistence.persistLiveStatus();
+        } catch (e) {
+            logger.warn('server: failed to persist preliminary status', String(e));
+        }
+        try {
+            await broadcastStatusSnapshot();
+        } catch (e) {
+            logger.warn('server: failed to broadcast preliminary status snapshot', String(e));
+        }
     } catch {
-        // ignore notification failures
+        // ignore failures here - proceed with background init
     }
 
     // Emit a ready line for the extension to detect successful startup.

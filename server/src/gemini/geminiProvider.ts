@@ -448,6 +448,14 @@ export class GeminiProvider {
                     ));
                     return;
                 }
+                // On successful execution, remember explicit path if it looks like one
+                try {
+                    if (geminiBin && geminiBin.includes(path.sep)) {
+                        DETECTED_GEMINI_BIN = geminiBin;
+                    }
+                } catch {
+                    // ignore
+                }
                 resolve({ stdout, stderr, exitCode });
             });
         });
@@ -632,7 +640,10 @@ export class GeminiProvider {
         // 3. Try to locate in common paths (Windows only)
         if (process.platform === 'win32') {
             const found = this.findGeminiInCommonPaths();
-            if (found) return found;
+            if (found) {
+                DETECTED_GEMINI_BIN = found;
+                return found;
+            }
         }
 
         // 4. Default to 'gemini' and hope PATH resolves it
