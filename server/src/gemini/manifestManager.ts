@@ -127,10 +127,9 @@ export async function loadMcpManifest(options: {
     workspaceRoot: string;
     server: any;
     runGeminiCliCommand: (args: string[], opts?: { stdin?: string; timeoutMs?: number }) => Promise<{ stdout: string; stderr: string }>;
-    ensureCliReady: () => void;
     manifestToolTimeoutMs: number;
 }) {
-    const { workspaceRoot, server, runGeminiCliCommand, ensureCliReady, manifestToolTimeoutMs } = options;
+    const { workspaceRoot, server, runGeminiCliCommand, manifestToolTimeoutMs } = options;
     try {
         const manifestPath = path.join(workspaceRoot, 'mcp.json');
         try {
@@ -196,12 +195,20 @@ export async function loadMcpManifest(options: {
                             inputSchema: inputSchemaZod
                         },
                         async (input: any, _extra: any) => {
+                            // Log that the manifest tool was invoked, even if it later fails.
                             try {
-                                ensureCliReady();
+                                const summary = (input && typeof input === 'object') ? { keys: Object.keys(input).slice(0, 10) } : undefined;
+                                logger.info('manifest: tool invocation requested', { toolName, inputSummary: summary });
+                            } catch {}
+
+                            try {
                                 const normalized = sanitizeManifestArgs(toolName, input ?? {}, workspaceRoot);
                                 const result = await invokeManifestTool(toolName, normalized, runGeminiCliCommand, manifestToolTimeoutMs);
                                 return { content: [{ type: 'text' as const, text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }] };
                             } catch (err) {
+                                try {
+                                    logger.warn('manifest: tool invocation failed', { toolName, error: String(err), message: formatWorkspaceError(err) });
+                                } catch {}
                                 return { content: [{ type: 'text' as const, text: JSON.stringify({ error: serializeErrorForClient(err) }) }] };
                             }
                         }

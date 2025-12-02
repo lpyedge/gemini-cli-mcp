@@ -648,16 +648,6 @@ function maybeUpdateCliStatusFromFailure(message: string) {
     enterCliFailure(classification, trimmed);
 }
 
-function ensureCliReady() {
-    if (acceptingTasks && cliStatus.state === 'ok') {
-        return;
-    }
-    throw new Error(
-        `Gemini CLI unavailable (${cliStatus.message}). Reload VS Code after fixing the CLI to re-enable background workers.`
-    );
-}
-
-
 
 async function start() {
     logger.info('server: starting', {
@@ -677,7 +667,7 @@ async function start() {
     // Load and register tool metadata from mcp.json (manifest) before connecting
     // the transport so tool capabilities can be registered without error.
     try {
-        await loadMcpManifestFromManager({ workspaceRoot, server, runGeminiCliCommand, ensureCliReady, manifestToolTimeoutMs });
+        await loadMcpManifestFromManager({ workspaceRoot, server, runGeminiCliCommand, manifestToolTimeoutMs });
     } catch (err) {
         logger.warn('server: failed to load MCP manifest (continuing startup)', String(err));
     }

@@ -3,6 +3,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { readConfig } from './configUtils';
 import { ModelBridgeConfig } from './types';
@@ -396,6 +397,4 @@ export class ModelBridge implements vscode.Disposable {
     socket.write(`${JSON.stringify(payload)}
 `);
   }
-
-  // token/auth removed for local stdio mode
 }
