@@ -1,16 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import * as os from 'node:os';
 
 import { GeminiConfig, ModelBridgeConfig } from './types';
 import { getToolNames } from './mcpManifest';
 
 // Utility helpers for reading extension configuration and small format helpers.
-
-const WINDOWS_STDIO_PATH = String.raw`\\.\pipe\gemini-mcp-bridge`;
-const DEFAULT_STDIO_PATH = os.platform() === 'win32'
-    ? WINDOWS_STDIO_PATH
-    : path.join(os.tmpdir(), 'gemini-mcp-bridge.sock');
 
 /**
  * Read the `geminiMcp` configuration from VS Code and return a typed config object.
@@ -23,14 +17,11 @@ export function readConfig(): GeminiConfig {
     const defaultAllowedTools = manifestToolNames ?? [];
     const modelBridge: ModelBridgeConfig = {
         enabled: config.get<boolean>('modelBridge.enabled', false),
-        stdioPath: config.get<string>('modelBridge.stdioPath', DEFAULT_STDIO_PATH),
         allowedTools: config.get<string[]>('modelBridge.allowedTools', defaultAllowedTools),
         allowOrchestrator: config.get<boolean>('modelBridge.allowOrchestrator', true),
-        requestTimeoutMs: config.get<number>('modelBridge.requestTimeoutMs', 120000),
-        captureSdkMessageId: config.get<'sdkHook' | 'bestEffort' | 'disabled'>('modelBridge.captureSdkMessageId', 'bestEffort')
+        requestTimeoutMs: config.get<number>('modelBridge.requestTimeoutMs', 120000)
     };
     return {
-        geminiPath: config.get<string>('geminiPath', 'gemini'),
         maxWorkers: config.get<number>('maxWorkers', 3),
         taskCwd: config.get<string>('taskCwd'),
         maxQueue: config.get<number>('maxQueue', 200),

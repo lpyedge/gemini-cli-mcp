@@ -7,6 +7,7 @@ Bring Gemini CLI automations to GitHub Copilot inside VS Code. This extension ex
 - Node.js 18+ (MCP server runtime).
 - Gemini CLI installed locally and accessible through `gemini` or a fully qualified path.
 - A VS Code workspace folder or an explicit absolute `geminiMcp.taskCwd` path; the server refuses to run against the extension’s installation directory.
+- (Optional) Install `@google/gemini-cli-core` either globally (`npm install -g @google/gemini-cli-core`) or in the workspace so the MCP server can reuse the core SDK. The server already falls back to the CLI binary when the core package is absent.
 
 ## How the Extension Runs
 
@@ -26,7 +27,6 @@ Bring Gemini CLI automations to GitHub Copilot inside VS Code. This extension ex
 
 | Setting | Description |
 | --- | --- |
-| `geminiPath` | Absolute path or PATH-resolvable Gemini CLI command (default `gemini`). |
 | `maxWorkers` | Maximum concurrent Gemini processes (default `3`). |
 | `taskCwd` | Working directory for spawned tasks (supports `${workspaceFolder}`); must be absolute if no workspace is open. |
 | `maxQueue` | Queue size before new tasks are rejected (default `200`). |
@@ -36,11 +36,9 @@ Changing any of these settings reloads the MCP provider and refreshes the worker
 
 ### Model Automation Bridge
 
-- `geminiMcp.modelBridge.stdioPath` (platform-dependent default): optional path for the local stdio/socket listener; when unset a workspace-derived socket path is used.
 - `geminiMcp.modelBridge.allowedTools`: whitelist of MCP tools that automation callers may invoke; leave empty to allow all tools discovered from the workspace `mcp.json` manifest.
 - `geminiMcp.modelBridge.allowOrchestrator` (default `true`): when `true`, the bridge also allows orchestrator requests so the orchestrated review workflow can be triggered programmatically.
 - `geminiMcp.modelBridge.requestTimeoutMs` (default `120000`): per-request timeout (ms) for proxied MCP tool calls; requests exceeding this will be canceled and return a timeout response.
-- `geminiMcp.modelBridge.captureSdkMessageId` (default `bestEffort`): how the extension captures SDK-assigned message ids for observability (`sdkHook` | `bestEffort` | `disabled`).
 
 
 The bridge gives Copilot-style agents the same model/tool surface that the extension already exposes via `geminiMcp.orchestrateReview` and `geminiMcp.invokeTool`. The current implementation is a local stdio/socket bridge rather than an HTTP server, and it is intended for use by trusted local agents.

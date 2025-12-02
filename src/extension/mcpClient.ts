@@ -67,10 +67,9 @@ export async function getMcpClient(cfg: any) {
   const serverEntry = path.join(extensionPath, 'server', 'dist', 'index.js');
   logger.info('mcpClient: serverEntry', { serverEntry });
   // Do not fall back to reading workspace-persisted status.json for runtime.
-  // Server-provided MCP snapshot is authoritative; use configured geminiPath only.
+  // Server-provided MCP snapshot is authoritative; rely on server-side discovery for Gemini CLI.
   const rawEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    GEMINI_CLI: cfg.geminiPath,
     GEMINI_MAX_WORKERS: String(Math.max(1, cfg.maxWorkers ?? 2)),
     GEMINI_TASK_CWD: workspaceRoot,
     GEMINI_MAX_QUEUE: String(Math.max(1, cfg.maxQueue ?? 200))
@@ -166,21 +165,9 @@ export async function getMcpClient(cfg: any) {
   } catch (e) {
     logger.warn('mcpClient: failed to attach transport stdio listeners', String(e));
   }
-  // Install outgoing-message capture depending on configured capture mode.
-  try {
-    const anyClient: any = client;
-    if (!anyClient.__outgoingListeners) anyClient.__outgoingListeners = new Set();
-    const captureMode = cfg && cfg.modelBridge && cfg.modelBridge.captureSdkMessageId ? cfg.modelBridge.captureSdkMessageId : 'bestEffort';
-    anyClient.__captureMode = captureMode;
-    // ...existing code...
-    // 所有 Array.from(anyClient.__outgoingListeners) 都加 as Function[]
-    // fn(parsed) 前加 typeof fn === 'function'
-  } catch (err) {
-    // 可選: 處理錯誤
-  }
-    cached = { client, transport };
-    creatingPromise = undefined;
-    return cached;
+  cached = { client, transport };
+  creatingPromise = undefined;
+  return cached;
   })();
   return await creatingPromise;
 }
@@ -196,27 +183,5 @@ export async function closeMcpClient() {
 }
 
 export async function callTool(client: any, name: string, args: any, options?: any) {
-  // Subscribe to client's outgoing hook if present. We'll register a temporary
-  // listener that captures the first outgoing message that contains an id.
-  let sdkMessageId: number | string | undefined = undefined;
-  const anyClient: any = client;
-  const listener = (parsed: any) => {
-    try {
-      if (parsed && (parsed.id !== undefined || parsed.requestId !== undefined)) {
-        if (sdkMessageId === undefined) sdkMessageId = parsed.id ?? parsed.requestId;
-      }
-    } catch { /* ignore */ }
-  };
-  const captureMode = (anyClient && anyClient.__captureMode) ? anyClient.__captureMode : 'bestEffort';
-  try {
-    if (captureMode !== 'disabled' && anyClient && anyClient.__outgoingListeners) {
-      anyClient.__outgoingListeners.add(listener);
-    }
-    const rawResult = await client.callTool({ name, arguments: args ?? {} }, undefined, options);
-    return { result: rawResult, sdkMessageId };
-  } finally {
-    try {
-      if (captureMode !== 'disabled' && anyClient && anyClient.__outgoingListeners) anyClient.__outgoingListeners.delete(listener);
-    } catch { /* ignore */ }
-  }
+  return await client.callTool({ name, arguments: args ?? {} }, undefined, options);
 }

@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import net from 'node:net';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { readConfig } from './configUtils';
@@ -36,8 +35,7 @@ function normalizeWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-function defaultSocketPath(stdioPath?: string) {
-  if (stdioPath && stdioPath.trim().length > 0) return stdioPath;
+function defaultSocketPath() {
   const workspaceRoot = normalizeWorkspaceRoot();
   const fp = workspaceRoot ? sha1(workspaceRoot).slice(0, 8) : sha1(process.cwd()).slice(0, 8);
   if (process.platform === 'win32') {
@@ -67,7 +65,7 @@ async function tryConnectOnce(socketPath: string, timeout = 200) {
 }
 
 export async function startStdioBridge(cfg: any, onConnection?: (socket: import('node:net').Socket, cfg?: any) => void) {
-  const chosen = defaultSocketPath(cfg?.stdioPath);
+  const chosen = defaultSocketPath();
   let socketPath = chosen;
   if (process.platform !== 'win32') {
     const dir = path.dirname(socketPath);
@@ -189,7 +187,7 @@ export async function stopStdioBridge(server: net.Server | null, socketPath?: st
 export class ModelBridge implements vscode.Disposable {
   private stdioServer?: net.Server;
   private stdioListener?: string;
-  private activeCalls: Map<string, { tool: string; startedAt: number; timedOut?: boolean; controller?: AbortController; sdkMessageId?: number | string }> = new Map();
+  private activeCalls: Map<string, { tool: string; startedAt: number; timedOut?: boolean; controller?: AbortController }> = new Map();
   private concurrentLimit = 4;
   private currentConcurrent = 0;
   private pendingQueue: Array<() => void> = [];
@@ -319,15 +317,8 @@ export class ModelBridge implements vscode.Disposable {
         this.activeCalls.set(requestId, entry);
 
         const callRes = await callTool(client, toolName, payload.args ?? {}, { signal: controller.signal, timeout: timeoutMs });
-        // callTool may return { result, sdkMessageId } (best-effort). Normalize.
-        const possibleSdkId = (callRes && typeof callRes === 'object' && 'sdkMessageId' in callRes) ? callRes.sdkMessageId : undefined;
         const result = (callRes && typeof callRes === 'object' && 'result' in callRes) ? callRes.result : callRes;
-        const entry2 = this.activeCalls.get(requestId);
-        if (entry2 && possibleSdkId !== undefined) {
-          entry2.sdkMessageId = possibleSdkId as any;
-          this.activeCalls.set(requestId, entry2);
-        }
-        logger.info(`[req=${requestId}] done tool=${toolName} sdk=${possibleSdkId ?? 'unknown'}`);
+        logger.info(`[req=${requestId}] done tool=${toolName}`);
         responder.respond(200, { id: requestId, success: true, response: safeJson(result) });
       } catch (error) {
         const errAny = error as any;
@@ -339,12 +330,12 @@ export class ModelBridge implements vscode.Disposable {
             if (callInfo) {
             callInfo.timedOut = true;
             try { callInfo.controller?.abort(new Error('local-timeout')); } catch { /* ignore */ }
-            logger.warn(`[req=${requestId}] timeout tool=${toolName} sdk=${callInfo.sdkMessageId ?? 'unknown'}`);
+            logger.warn(`[req=${requestId}] timeout tool=${toolName}`);
           }
           responder.respond(504, { id: requestId, error: 'tool_timeout', message: msg });
         } else {
           const code = 'tool_failed';
-          logger.warn(`[req=${requestId}] error tool=${toolName} sdk=${(this.activeCalls.get(requestId)?.sdkMessageId) ?? 'unknown'} message=${msg}`);
+          logger.warn(`[req=${requestId}] error tool=${toolName} message=${msg}`);
           responder.respond(500, { id: requestId, error: code, message: msg });
         }
       } finally {

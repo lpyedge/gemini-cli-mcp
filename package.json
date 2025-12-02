@@ -30,11 +30,6 @@
     "configuration": {
       "title": "Gemini CLI MCP",
       "properties": {
-        "geminiMcp.geminiPath": {
-          "type": "string",
-          "default": "gemini",
-          "description": "Absolute or PATH-resolvable command for Gemini CLI workers."
-        },
         "geminiMcp.maxWorkers": {
           "type": "number",
           "default": 3,
@@ -69,23 +64,11 @@
           "default": true,
           "description": "Enable the local model automation bridge (stdio/socket) so local agents can submit MCP tool calls programmatically."
         },
-        "geminiMcp.modelBridge.stdioPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional path for the local stdio/socket listener. Leave empty to use a workspace-derived default path."
-        },
-        
         "geminiMcp.modelBridge.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
           "minimum": 0,
           "description": "Request timeout (ms) for bridge proxied MCP tool calls. Requests exceeding this will return 504 and attempt cancellation."
-        },
-        "geminiMcp.modelBridge.captureSdkMessageId": {
-          "type": "string",
-          "default": "bestEffort",
-          "enum": ["sdkHook", "bestEffort", "disabled"],
-          "description": "How the extension captures SDK-assigned message ids for observability: 'sdkHook' prefers a stable SDK-provided hook, 'bestEffort' uses transport/protocol wrapping, 'disabled' turns off capture (no overhead)."
         },
         "geminiMcp.modelBridge.allowedTools": {
           "type": "array",

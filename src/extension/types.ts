@@ -8,7 +8,6 @@ import * as vscode from 'vscode';
 // a single stdio default.
 
 export interface GeminiConfig {
-    geminiPath: string;
     maxWorkers: number;
     taskCwd: string | undefined;
     maxQueue: number;
@@ -18,16 +17,9 @@ export interface GeminiConfig {
 
 export interface ModelBridgeConfig {
     enabled: boolean;
-    stdioPath: string;
     allowedTools: string[];
     allowOrchestrator: boolean;
     requestTimeoutMs?: number;
-    /**
-     * How the extension captures SDK-assigned message ids. 'sdkHook' prefers
-     * a stable SDK-provided hook, 'bestEffort' uses transport/protocol wrapping,
-     * 'disabled' turns off capture to avoid overhead.
-     */
-    captureSdkMessageId?: 'sdkHook' | 'bestEffort' | 'disabled';
 }
 
 export interface LiveStatusSnapshot {

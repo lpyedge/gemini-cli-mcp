@@ -81,7 +81,6 @@ async function buildMcpDefinitions(
 	// Merge process.env to preserve PATH and other runtime environment values
 	const envVars: NodeJS.ProcessEnv = {
 		...process.env,
-		GEMINI_CLI: cfg.geminiPath,
 		GEMINI_MAX_WORKERS: String(Math.max(1, cfg.maxWorkers)),
 		GEMINI_TASK_CWD: resolvedTaskCwd,
 		GEMINI_MAX_QUEUE: String(Math.max(1, cfg.maxQueue))
