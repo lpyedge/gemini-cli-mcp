@@ -441,47 +441,25 @@ function buildToolExecutionPrompt(
 
     const sections: string[] = [];
 
-    // === Section 1: Strict System Instruction ===
-    // 使用 "SYSTEM" 關鍵字並強調 "JSON ONLY"，避免模型進入對話模式
-    sections.push(`[SYSTEM INSTRUCTION]
-You are a headless tool execution engine.
-Your ONLY purpose is to execute the tool "${toolName}" and output the result in JSON format.
-DO NOT acknowledge this prompt.
-DO NOT say "Okay", "I am ready", or "Here is the result".
-DO NOT output any conversational text.
-Output ONLY the valid JSON result.`);
-
-    // === Section 2: Tool Context ===
+    // === Section 1: The Command (Task) ===
     const purpose = toolDescription?.trim() || guidance.task;
-    sections.push(`[TOOL CONTEXT]
-Name: ${toolName}
-Description: ${purpose}`);
-    
-    if (effectiveInputSchema) {
-        sections.push(`Input Schema:
-${effectiveInputSchema}`);
-    }
-    
-    sections.push(`Output Schema:
+    sections.push(`Task: ${purpose}`);
+
+    // === Section 2: The Input ===
+    sections.push(`Input Variables:\n${argJson}`);
+
+    // === Section 3: The Constraint (Output format) ===
+    sections.push(`Instructions:
+1. Process the input variables according to the task.
+2. Output the result strictly as a valid JSON object.
+3. Do not output any conversational text (e.g. "Okay", "Here is the result").
+4. The output must match this JSON schema:
 ${effectiveOutputSchema}`);
 
-    // === Section 3: The Task ===
-    sections.push(`[TASK]
-${guidance.task}`);
-
-    // === Section 4: Input Data ===
-    sections.push(`[INPUT DATA]
-${argJson}`);
-
-    // === Section 5: Examples ===
+    // === Section 4: Example ===
     if (guidance.examples) {
-        sections.push(`[EXAMPLE OUTPUT]
-${guidance.examples}`);
+        sections.push(`Example Output:\n${guidance.examples}`);
     }
-
-    // === Section 6: Final Trigger ===
-    sections.push(`[EXECUTE]
-Generate the JSON response now.`);
 
     return sections.join('\n\n');
 }
@@ -496,6 +474,12 @@ function buildPromptFallback(toolName: string, args: Record<string, unknown>, to
  * 
  * 這個函數將主 AI 的工具調用請求轉換為一個結構化的 prompt，
  * 發送給 Gemini CLI 執行，並解析返回的 JSON 結果。
+ * 
+ * Gemini CLI headless 模式要點：
+ * - 使用 `--prompt` 傳遞任務
+ * - 使用 `--output-format json` 取得結構化輸出
+ * - 使用 `--yolo` 自動核准所有操作（避免等待確認）
+ * - 輸出格式為 `{ response: "...", stats: {...} }`，需從 `response` 提取結果
  * 
  * @param toolName - 工具名稱（如 "dev.summarizeCode"）
  * @param args - 主 AI 傳來的參數（已經過 sanitize）
@@ -531,8 +515,12 @@ async function invokeManifestTool(
             hasOutputSchema: Boolean(toolMeta?.outputSchema)
         });
 
+        // Gemini CLI headless 模式：
+        // - --prompt: 傳遞任務
+        // - --output-format json: 取得結構化輸出 { response, stats, error? }
+        // - --yolo: 自動核准所有操作，避免等待確認而進入對話模式
         const { stdout, stderr } = await runGeminiCliCommand(
-            ['--prompt', prompt, '--output-format', 'json'],
+            ['--prompt', prompt, '--output-format', 'json', '--yolo'],
             { timeoutMs: manifestToolTimeoutMs }
         );
 
@@ -546,23 +534,71 @@ async function invokeManifestTool(
             throw new Error('prompt: empty output from CLI');
         }
 
-        // 嘗試解析 JSON 輸出
+        // 解析 Gemini CLI 的 JSON 輸出
+        // 結構為: { response: string, stats: {...}, error?: {...} }
         try {
-            const parsed = JSON.parse(trimmed);
-            logger.info('manifest: prompt produced JSON output', {
+            const cliOutput = JSON.parse(trimmed);
+            logger.info('manifest: CLI produced JSON output', {
                 toolName,
                 bytes: Buffer.byteLength(trimmed, 'utf8'),
-                keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 5) : []
+                hasResponse: Boolean(cliOutput?.response),
+                hasError: Boolean(cliOutput?.error)
             });
             
-            // 檢查是否返回了錯誤
-            if (parsed && typeof parsed === 'object' && 'error' in parsed && Object.keys(parsed).length === 1) {
-                logger.warn('manifest: tool returned error response', { toolName, error: parsed.error });
+            // 檢查 CLI 是否返回了錯誤
+            if (cliOutput && typeof cliOutput === 'object' && cliOutput.error) {
+                const errorMsg = cliOutput.error.message || JSON.stringify(cliOutput.error);
+                logger.warn('manifest: CLI returned error', { toolName, error: errorMsg });
+                throw new Error(`CLI error: ${errorMsg}`);
             }
-            
-            return parsed;
+
+            // 從 response 欄位提取實際回應
+            const responseText = cliOutput?.response;
+            if (typeof responseText !== 'string' || !responseText.trim()) {
+                // 如果沒有 response 欄位，可能是舊版格式或直接輸出
+                // 嘗試將整個輸出作為結果
+                logger.info('manifest: no response field, using full output', { toolName });
+                return cliOutput;
+            }
+
+            // 嘗試將 response 解析為 JSON（模型可能返回 JSON 字串）
+            const responseTrimmed = responseText.trim();
+            try {
+                const parsed = JSON.parse(responseTrimmed);
+                logger.info('manifest: response parsed as JSON', {
+                    toolName,
+                    keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 5) : []
+                });
+                return parsed;
+            } catch {
+                // response 不是 JSON，嘗試提取 markdown 中的 JSON 區塊
+                const jsonMatch = responseTrimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+                if (jsonMatch && jsonMatch[1]) {
+                    try {
+                        const extracted = JSON.parse(jsonMatch[1].trim());
+                        logger.info('manifest: extracted JSON from markdown in response', { toolName });
+                        return extracted;
+                    } catch {
+                        // 繼續使用原始文字
+                    }
+                }
+                
+                // response 是純文字，包裝為標準格式返回
+                logger.info('manifest: response is plain text', {
+                    toolName,
+                    preview: responseTrimmed.slice(0, 100)
+                });
+                return { result: responseTrimmed };
+            }
         } catch (parseErr) {
-            // 如果不是 JSON，嘗試提取 JSON 區塊（CLI 可能返回帶有 markdown 的輸出）
+            // stdout 不是有效的 JSON
+            logger.warn('manifest: failed to parse CLI output as JSON', {
+                toolName,
+                error: String(parseErr),
+                preview: trimmed.slice(0, 200)
+            });
+            
+            // 嘗試提取 JSON 區塊
             const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
             if (jsonMatch && jsonMatch[1]) {
                 try {
@@ -573,12 +609,6 @@ async function invokeManifestTool(
                     // 繼續使用原始文字
                 }
             }
-            
-            logger.info('manifest: prompt produced text output (non-JSON)', {
-                toolName,
-                bytes: Buffer.byteLength(trimmed, 'utf8'),
-                preview: trimmed.slice(0, 100)
-            });
             
             // 包裝為標準格式返回
             return { result: trimmed };
