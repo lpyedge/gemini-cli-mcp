@@ -203,7 +203,13 @@ export async function loadMcpManifest(options: {
 
                             try {
                                 const normalized = sanitizeManifestArgs(toolName, input ?? {}, workspaceRoot);
-                                const result = await invokeManifestTool(toolName, normalized, runGeminiCliCommand, manifestToolTimeoutMs);
+                                // 傳遞完整的工具元資料，包括 schema 資訊
+                                const toolMeta = {
+                                    description: t.description,
+                                    inputSchema: resolvedArgs,      // 已解析的輸入 schema
+                                    outputSchema: t.returns         // mcp.json 中定義的輸出 schema
+                                };
+                                const result = await invokeManifestTool(toolName, normalized, runGeminiCliCommand, manifestToolTimeoutMs, toolMeta);
                                 return { content: [{ type: 'text' as const, text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }] };
                             } catch (err) {
                                 try {
@@ -300,50 +306,284 @@ function assertPathWithinWorkspace(target: string, workspaceRoot: string) {
     throw new Error('File path is outside the allowed workspace directory.');
 }
 
-async function invokeManifestTool(toolName: string, args: Record<string, unknown>, runGeminiCliCommand: (args: string[], opts?: { stdin?: string; timeoutMs?: number }) => Promise<{ stdout: string; stderr: string }>, manifestToolTimeoutMs: number) {
-    const attempts = buildManifestInvocationAttempts(toolName, args, manifestToolTimeoutMs);
-    const errors: string[] = [];
-    for (const attempt of attempts) {
-        try {
-            logger.info('manifest: invoking tool', {
-                toolName,
-                attempt: attempt.label,
-                args: attempt.args,
-                stdinBytes: attempt.stdin ? attempt.stdin.length : 0
-            });
-            const { stdout } = await runGeminiCliCommand(attempt.args, { stdin: attempt.stdin, timeoutMs: attempt.timeoutMs });
-            const trimmed = stdout.trim();
-            if (!trimmed) {
-                logger.warn('manifest: tool returned empty output', {
-                    toolName,
-                    attempt: attempt.label
-                });
-                errors.push(`${attempt.label}: empty output`);
-                continue;
-            }
-            try {
-                logger.info('manifest: tool produced JSON output', {
-                    toolName,
-                    attempt: attempt.label,
-                    bytes: Buffer.byteLength(trimmed, 'utf8')
-                });
-                return JSON.parse(trimmed);
-            } catch {
-                logger.info('manifest: tool produced text output', {
-                    toolName,
-                    attempt: attempt.label,
-                    bytes: Buffer.byteLength(trimmed, 'utf8')
-                });
-                return trimmed;
-            }
-        } catch (error) {
-            logger.warn('manifest: tool invocation failed', {
-                toolName,
-                attempt: attempt.label,
-                error: formatWorkspaceError(error)
-            });
-            errors.push(`${attempt.label}: ${formatWorkspaceError(error)}`);
+/**
+ * 工具專屬的任務指引與輸出格式說明。
+ * 這些指引會嵌入到 prompt 中，幫助 Gemini CLI 理解每個工具的具體行為。
+ */
+function buildToolGuidance(toolName: string, args: Record<string, unknown>): { task: string; outputSchema: string; examples?: string } {
+    switch (toolName) {
+        case 'web.findLibraryUsage': {
+            const pkg = typeof args.packageName === 'string' ? args.packageName : '<package>';
+            return {
+                task: `Search the web for documentation, usage examples, and API references for the package "${pkg}".`,
+                outputSchema: JSON.stringify({
+                    type: 'object',
+                    properties: {
+                        package: { type: 'string', description: 'The package name searched' },
+                        matches: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    title: { type: 'string' },
+                                    summary: { type: 'string' },
+                                    url: { type: 'string' },
+                                    kind: { type: 'string', enum: ['docs', 'example', 'api', 'tutorial'] }
+                                }
+                            }
+                        }
+                    },
+                    required: ['package', 'matches']
+                }, null, 2),
+                examples: `{"package":"${pkg}","matches":[{"title":"Official Docs","summary":"...","url":"https://...","kind":"docs"}]}`
+            };
         }
+        case 'web.findCodeExample': {
+            return {
+                task: 'Search the public web for code examples that implement the requested feature or API.',
+                outputSchema: JSON.stringify({
+                    type: 'object',
+                    properties: {
+                        results: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    title: { type: 'string' },
+                                    snippet: { type: 'string', description: 'Code snippet if available' },
+                                    url: { type: 'string' },
+                                    source: { type: 'string', description: 'e.g. GitHub, StackOverflow' }
+                                }
+                            }
+                        }
+                    },
+                    required: ['results']
+                }, null, 2)
+            };
+        }
+        case 'dev.summarizeCode': {
+            return {
+                task: 'Generate a concise summary (3-5 sentences or bullet points) of the provided code.',
+                outputSchema: '{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}'
+            };
+        }
+        case 'dev.explainSnippet': {
+            return {
+                task: 'Provide a step-by-step or line-by-line explanation of the code snippet.',
+                outputSchema: '{"type":"object","properties":{"explanation":{"type":"string"}},"required":["explanation"]}'
+            };
+        }
+        case 'dev.generateComments': {
+            return {
+                task: 'Insert detailed inline and/or header comments into the provided code.',
+                outputSchema: '{"type":"object","properties":{"commentedCode":{"type":"string"}},"required":["commentedCode"]}'
+            };
+        }
+        case 'dev.refactorCode': {
+            return {
+                task: 'Refactor the provided code according to the specified goal (e.g., split function, improve performance).',
+                outputSchema: '{"type":"object","properties":{"refactored":{"type":"string"},"diff":{"type":"string"}},"required":["refactored"]}'
+            };
+        }
+        case 'dev.extractInterface': {
+            return {
+                task: 'Infer and extract an interface or type definition from the provided implementation code.',
+                outputSchema: '{"type":"object","properties":{"interface":{"type":"string"}},"required":["interface"]}'
+            };
+        }
+        case 'dev.generateTests': {
+            return {
+                task: 'Generate unit tests for the provided code, targeting the specified test framework.',
+                outputSchema: '{"type":"object","properties":{"tests":{"type":"string"}},"required":["tests"]}'
+            };
+        }
+        case 'dev.translateCode': {
+            return {
+                task: 'Translate the provided code to the target programming language while preserving functionality.',
+                outputSchema: '{"type":"object","properties":{"translated":{"type":"string"},"notes":{"type":"string"}},"required":["translated"]}'
+            };
+        }
+        default:
+            return {
+                task: 'Execute the tool action using the provided arguments and return a structured result.',
+                outputSchema: '{"type":"object","additionalProperties":true}'
+            };
     }
-    throw new Error(errors.join('; '));
+}
+
+/**
+ * 建構完整的 prompt，用於讓 Gemini CLI 扮演指定的 MCP 工具角色。
+ * 
+ * Prompt 結構：
+ * 1. System 角色設定：說明 CLI 正在代理執行 MCP 工具
+ * 2. 工具定義：包含 description 和預期的輸入/輸出 schema
+ * 3. 執行指令：強調立即執行、不問問題、只返回 JSON
+ * 4. 輸入參數：主 AI 傳來的實際請求參數
+ */
+function buildToolExecutionPrompt(
+    toolName: string,
+    args: Record<string, unknown>,
+    toolDescription?: string,
+    inputSchema?: unknown,
+    outputSchema?: unknown
+): string {
+    const argJson = JSON.stringify(args ?? {}, null, 2);
+    const guidance = buildToolGuidance(toolName, args);
+    
+    // 優先使用 mcp.json 定義的 schema，否則用工具專屬的預設 schema
+    const effectiveOutputSchema = outputSchema 
+        ? (typeof outputSchema === 'string' ? outputSchema : JSON.stringify(outputSchema, null, 2))
+        : guidance.outputSchema;
+    
+    const effectiveInputSchema = inputSchema
+        ? (typeof inputSchema === 'string' ? inputSchema : JSON.stringify(inputSchema, null, 2))
+        : null;
+
+    const sections: string[] = [];
+
+    // === Section 1: Strict System Instruction ===
+    // 使用 "SYSTEM" 關鍵字並強調 "JSON ONLY"，避免模型進入對話模式
+    sections.push(`[SYSTEM INSTRUCTION]
+You are a headless tool execution engine.
+Your ONLY purpose is to execute the tool "${toolName}" and output the result in JSON format.
+DO NOT acknowledge this prompt.
+DO NOT say "Okay", "I am ready", or "Here is the result".
+DO NOT output any conversational text.
+Output ONLY the valid JSON result.`);
+
+    // === Section 2: Tool Context ===
+    const purpose = toolDescription?.trim() || guidance.task;
+    sections.push(`[TOOL CONTEXT]
+Name: ${toolName}
+Description: ${purpose}`);
+    
+    if (effectiveInputSchema) {
+        sections.push(`Input Schema:
+${effectiveInputSchema}`);
+    }
+    
+    sections.push(`Output Schema:
+${effectiveOutputSchema}`);
+
+    // === Section 3: The Task ===
+    sections.push(`[TASK]
+${guidance.task}`);
+
+    // === Section 4: Input Data ===
+    sections.push(`[INPUT DATA]
+${argJson}`);
+
+    // === Section 5: Examples ===
+    if (guidance.examples) {
+        sections.push(`[EXAMPLE OUTPUT]
+${guidance.examples}`);
+    }
+
+    // === Section 6: Final Trigger ===
+    sections.push(`[EXECUTE]
+Generate the JSON response now.`);
+
+    return sections.join('\n\n');
+}
+
+// Legacy alias for backward compatibility (if needed elsewhere)
+function buildPromptFallback(toolName: string, args: Record<string, unknown>, toolDescription?: string) {
+    return buildToolExecutionPrompt(toolName, args, toolDescription);
+}
+
+/**
+ * 調用 manifest 定義的工具。
+ * 
+ * 這個函數將主 AI 的工具調用請求轉換為一個結構化的 prompt，
+ * 發送給 Gemini CLI 執行，並解析返回的 JSON 結果。
+ * 
+ * @param toolName - 工具名稱（如 "dev.summarizeCode"）
+ * @param args - 主 AI 傳來的參數（已經過 sanitize）
+ * @param runGeminiCliCommand - CLI 執行函數
+ * @param manifestToolTimeoutMs - 超時設定
+ * @param toolMeta - 工具元資料（description, inputSchema, outputSchema）
+ */
+async function invokeManifestTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    runGeminiCliCommand: (args: string[], opts?: { stdin?: string; timeoutMs?: number }) => Promise<{ stdout: string; stderr: string }>,
+    manifestToolTimeoutMs: number,
+    toolMeta?: {
+        description?: string;
+        inputSchema?: unknown;
+        outputSchema?: unknown;
+    }
+) {
+    try {
+        // 建構結構化的 prompt，包含工具定義、schema、執行規則和輸入參數
+        const prompt = buildToolExecutionPrompt(
+            toolName,
+            args,
+            toolMeta?.description,
+            toolMeta?.inputSchema,
+            toolMeta?.outputSchema
+        );
+        
+        logger.info('manifest: invoking via prompt execution', {
+            toolName,
+            promptBytes: Buffer.byteLength(prompt, 'utf8'),
+            hasInputSchema: Boolean(toolMeta?.inputSchema),
+            hasOutputSchema: Boolean(toolMeta?.outputSchema)
+        });
+
+        const { stdout, stderr } = await runGeminiCliCommand(
+            ['--prompt', prompt, '--output-format', 'json'],
+            { timeoutMs: manifestToolTimeoutMs }
+        );
+
+        // 記錄 stderr（如果有）以便除錯
+        if (stderr && stderr.trim()) {
+            logger.warn('manifest: CLI stderr output', { toolName, stderr: stderr.slice(0, 500) });
+        }
+
+        const trimmed = stdout.trim();
+        if (!trimmed) {
+            throw new Error('prompt: empty output from CLI');
+        }
+
+        // 嘗試解析 JSON 輸出
+        try {
+            const parsed = JSON.parse(trimmed);
+            logger.info('manifest: prompt produced JSON output', {
+                toolName,
+                bytes: Buffer.byteLength(trimmed, 'utf8'),
+                keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 5) : []
+            });
+            
+            // 檢查是否返回了錯誤
+            if (parsed && typeof parsed === 'object' && 'error' in parsed && Object.keys(parsed).length === 1) {
+                logger.warn('manifest: tool returned error response', { toolName, error: parsed.error });
+            }
+            
+            return parsed;
+        } catch (parseErr) {
+            // 如果不是 JSON，嘗試提取 JSON 區塊（CLI 可能返回帶有 markdown 的輸出）
+            const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch && jsonMatch[1]) {
+                try {
+                    const extracted = JSON.parse(jsonMatch[1].trim());
+                    logger.info('manifest: extracted JSON from markdown block', { toolName });
+                    return extracted;
+                } catch {
+                    // 繼續使用原始文字
+                }
+            }
+            
+            logger.info('manifest: prompt produced text output (non-JSON)', {
+                toolName,
+                bytes: Buffer.byteLength(trimmed, 'utf8'),
+                preview: trimmed.slice(0, 100)
+            });
+            
+            // 包裝為標準格式返回
+            return { result: trimmed };
+        }
+    } catch (err) {
+        throw new Error(`prompt-execution: ${formatWorkspaceError(err)}`);
+    }
 }
