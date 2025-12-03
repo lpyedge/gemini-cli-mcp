@@ -76,11 +76,13 @@ export async function getMcpClient(cfg: any) {
   };
   const env = sanitizeEnv(rawEnv);
 
-  const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry], env, stdout: 'pipe', stderr: 'pipe' });
-  const tAny: any = transport;
+  // Use stderr: 'pipe' to capture server logs. The SDK exposes transport.stderr
+  // as a PassThrough stream that can be attached to BEFORE start() is called.
+  const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry], env, stderr: 'pipe' });
 
-  // Forward server stdout/stderr into the extension logger, preserving level when available.
-  function forwardServerOutput(chunk: any, defaultLevel: 'info' | 'warn') {
+  // Forward server stderr into the extension logger, preserving level when available.
+  // Attach BEFORE connect() so we don't miss early log output.
+  function forwardServerOutput(chunk: any) {
     try {
       const text = String(chunk);
       const lines = text.split(/\r?\n/);
@@ -107,13 +109,23 @@ export async function getMcpClient(cfg: any) {
               break;
           }
         } else {
-          // No server prefix; fallback to default level depending on stream.
-          if (defaultLevel === 'warn') logger.warn(line); else logger.info(line);
+          // No server prefix; output as-is
+          logger.info(line);
         }
       }
     } catch (e) {
       try { logger.info('[server] ' + String(chunk)); } catch { /* swallow */ }
     }
+  }
+
+  // Attach stderr listener BEFORE connect so we capture early log output.
+  // transport.stderr is a PassThrough available immediately when stderr: 'pipe'.
+  const stderrStream = transport.stderr;
+  if (stderrStream && typeof (stderrStream as any).on === 'function') {
+    (stderrStream as any).on('data', forwardServerOutput);
+    logger.info('mcpClient: stderr listener attached (pre-connect)');
+  } else {
+    logger.warn('mcpClient: transport.stderr not available; server logs may be missing');
   }
 
   const client = new Client({ name: 'vscode-mcp-client', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
@@ -149,22 +161,7 @@ export async function getMcpClient(cfg: any) {
   logger.info('mcpClient: connecting to server...');
   await client.connect(transport);
   logger.info('mcpClient: connected to server');
-  // Attach transport stdout/stderr listeners after connect so underlying
-  // streams are available. Provide a clear diagnostic log when listeners
-  // are attached so we can verify piping succeeded.
-  try {
-    if (tAny.stdout && typeof tAny.stdout.on === 'function') {
-      tAny.stdout.on('data', (c: any) => forwardServerOutput(c, 'info'));
-    }
-    if (tAny.stderr && typeof tAny.stderr.on === 'function') {
-      tAny.stderr.on('data', (c: any) => forwardServerOutput(c, 'warn'));
-      logger.info('mcpClient: stderr listener attached');
-    } else {
-      logger.warn('mcpClient: transport.stderr not available; server logs may be missing');
-    }
-  } catch (e) {
-    logger.warn('mcpClient: failed to attach transport stdio listeners', String(e));
-  }
+
   cached = { client, transport };
   creatingPromise = undefined;
   return cached;

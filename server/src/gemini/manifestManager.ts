@@ -307,166 +307,191 @@ function assertPathWithinWorkspace(target: string, workspaceRoot: string) {
 }
 
 /**
- * 工具專屬的任務指引與輸出格式說明。
- * 這些指引會嵌入到 prompt 中，幫助 Gemini CLI 理解每個工具的具體行為。
- */
-function buildToolGuidance(toolName: string, args: Record<string, unknown>): { task: string; outputSchema: string; examples?: string } {
-    switch (toolName) {
-        case 'web.findLibraryUsage': {
-            const pkg = typeof args.packageName === 'string' ? args.packageName : '<package>';
-            return {
-                task: `Search the web for documentation, usage examples, and API references for the package "${pkg}".`,
-                outputSchema: JSON.stringify({
-                    type: 'object',
-                    properties: {
-                        package: { type: 'string', description: 'The package name searched' },
-                        matches: {
-                            type: 'array',
-                            items: {
-                                type: 'object',
-                                properties: {
-                                    title: { type: 'string' },
-                                    summary: { type: 'string' },
-                                    url: { type: 'string' },
-                                    kind: { type: 'string', enum: ['docs', 'example', 'api', 'tutorial'] }
-                                }
-                            }
-                        }
-                    },
-                    required: ['package', 'matches']
-                }, null, 2),
-                examples: `{"package":"${pkg}","matches":[{"title":"Official Docs","summary":"...","url":"https://...","kind":"docs"}]}`
-            };
-        }
-        case 'web.findCodeExample': {
-            return {
-                task: 'Search the public web for code examples that implement the requested feature or API.',
-                outputSchema: JSON.stringify({
-                    type: 'object',
-                    properties: {
-                        results: {
-                            type: 'array',
-                            items: {
-                                type: 'object',
-                                properties: {
-                                    title: { type: 'string' },
-                                    snippet: { type: 'string', description: 'Code snippet if available' },
-                                    url: { type: 'string' },
-                                    source: { type: 'string', description: 'e.g. GitHub, StackOverflow' }
-                                }
-                            }
-                        }
-                    },
-                    required: ['results']
-                }, null, 2)
-            };
-        }
-        case 'dev.summarizeCode': {
-            return {
-                task: 'Generate a concise summary (3-5 sentences or bullet points) of the provided code.',
-                outputSchema: '{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}'
-            };
-        }
-        case 'dev.explainSnippet': {
-            return {
-                task: 'Provide a step-by-step or line-by-line explanation of the code snippet.',
-                outputSchema: '{"type":"object","properties":{"explanation":{"type":"string"}},"required":["explanation"]}'
-            };
-        }
-        case 'dev.generateComments': {
-            return {
-                task: 'Insert detailed inline and/or header comments into the provided code.',
-                outputSchema: '{"type":"object","properties":{"commentedCode":{"type":"string"}},"required":["commentedCode"]}'
-            };
-        }
-        case 'dev.refactorCode': {
-            return {
-                task: 'Refactor the provided code according to the specified goal (e.g., split function, improve performance).',
-                outputSchema: '{"type":"object","properties":{"refactored":{"type":"string"},"diff":{"type":"string"}},"required":["refactored"]}'
-            };
-        }
-        case 'dev.extractInterface': {
-            return {
-                task: 'Infer and extract an interface or type definition from the provided implementation code.',
-                outputSchema: '{"type":"object","properties":{"interface":{"type":"string"}},"required":["interface"]}'
-            };
-        }
-        case 'dev.generateTests': {
-            return {
-                task: 'Generate unit tests for the provided code, targeting the specified test framework.',
-                outputSchema: '{"type":"object","properties":{"tests":{"type":"string"}},"required":["tests"]}'
-            };
-        }
-        case 'dev.translateCode': {
-            return {
-                task: 'Translate the provided code to the target programming language while preserving functionality.',
-                outputSchema: '{"type":"object","properties":{"translated":{"type":"string"},"notes":{"type":"string"}},"required":["translated"]}'
-            };
-        }
-        default:
-            return {
-                task: 'Execute the tool action using the provided arguments and return a structured result.',
-                outputSchema: '{"type":"object","additionalProperties":true}'
-            };
-    }
-}
-
-/**
- * 建構完整的 prompt，用於讓 Gemini CLI 扮演指定的 MCP 工具角色。
+ * 建構自然語言風格的 prompt，讓 Gemini CLI 執行指定的任務。
  * 
- * Prompt 結構：
- * 1. System 角色設定：說明 CLI 正在代理執行 MCP 工具
- * 2. 工具定義：包含 description 和預期的輸入/輸出 schema
- * 3. 執行指令：強調立即執行、不問問題、只返回 JSON
- * 4. 輸入參數：主 AI 傳來的實際請求參數
+ * 設計原則：
+ * 1. 直接、具體的請求，避免角色扮演或系統指令
+ * 2. 將參數自然地嵌入請求中
+ * 3. 明確的輸出格式要求
+ * 4. 針對不同工具類型提供適當的範例
  */
 function buildToolExecutionPrompt(
     toolName: string,
     args: Record<string, unknown>,
     toolDescription?: string,
-    inputSchema?: unknown,
+    _inputSchema?: unknown,
     outputSchema?: unknown
 ): string {
-    const argJson = JSON.stringify(args ?? {}, null, 2);
-    const guidance = buildToolGuidance(toolName, args);
+    const lines: string[] = [];
     
-    // 優先使用 mcp.json 定義的 schema，否則用工具專屬的預設 schema
-    const effectiveOutputSchema = outputSchema 
-        ? (typeof outputSchema === 'string' ? outputSchema : JSON.stringify(outputSchema, null, 2))
-        : guidance.outputSchema;
-    
-    const effectiveInputSchema = inputSchema
-        ? (typeof inputSchema === 'string' ? inputSchema : JSON.stringify(inputSchema, null, 2))
-        : null;
-
-    const sections: string[] = [];
-
-    // === Section 1: The Command (Task) ===
-    const purpose = toolDescription?.trim() || guidance.task;
-    sections.push(`Task: ${purpose}`);
-
-    // === Section 2: The Input ===
-    sections.push(`Input Variables:\n${argJson}`);
-
-    // === Section 3: The Constraint (Output format) ===
-    sections.push(`Instructions:
-1. Process the input variables according to the task.
-2. Output the result strictly as a valid JSON object.
-3. Do not output any conversational text (e.g. "Okay", "Here is the result").
-4. The output must match this JSON schema:
-${effectiveOutputSchema}`);
-
-    // === Section 4: Example ===
-    if (guidance.examples) {
-        sections.push(`Example Output:\n${guidance.examples}`);
+    // 根據工具類型建構具體的請求
+    switch (toolName) {
+        case 'web.findLibraryUsage': {
+            const pkg = typeof args.packageName === 'string' ? args.packageName : '';
+            const query = typeof args.query === 'string' ? args.query : '';
+            const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 10;
+            
+            lines.push(`Search the web for documentation and usage examples of the npm package "${pkg}".`);
+            if (query) lines.push(`Focus on: ${query}`);
+            lines.push('');
+            lines.push(`Find up to ${maxResults} relevant results including official docs, tutorials, and API references.`);
+            lines.push('');
+            lines.push('Return a JSON object like this:');
+            lines.push(`{"package":"${pkg}","matches":[{"title":"...", "summary":"...", "url":"https://...", "kind":"docs|example|api|tutorial"}]}`);
+            break;
+        }
+        
+        case 'web.findCodeExample': {
+            const query = typeof args.query === 'string' ? args.query : '';
+            const language = typeof args.language === 'string' ? args.language : '';
+            const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 5;
+            
+            lines.push(`Search the web for code examples that show how to: ${query}`);
+            if (language) lines.push(`Preferred language: ${language}`);
+            lines.push('');
+            lines.push(`Find up to ${maxResults} code examples from GitHub, StackOverflow, or documentation sites.`);
+            lines.push('');
+            lines.push('Return a JSON object like this:');
+            lines.push('{"results":[{"title":"...", "snippet":"// code here", "url":"https://...", "source":"GitHub|StackOverflow|..."}]}');
+            break;
+        }
+        
+        case 'dev.summarizeCode': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const filePath = typeof args.path === 'string' ? args.path : '';
+            
+            if (filePath) {
+                lines.push(`Summarize the code in file: ${filePath}`);
+            } else if (content) {
+                lines.push('Summarize this code:');
+                lines.push('```');
+                lines.push(content.slice(0, 3000)); // 限制長度
+                lines.push('```');
+            }
+            lines.push('');
+            lines.push('Provide a concise summary in 3-5 sentences covering the main purpose and key functionality.');
+            lines.push('');
+            lines.push('Return: {"summary":"..."}');
+            break;
+        }
+        
+        case 'dev.explainSnippet': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const language = typeof args.language === 'string' ? args.language : '';
+            
+            lines.push('Explain this code step by step:');
+            lines.push(`\`\`\`${language}`);
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            lines.push('Return: {"explanation":"..."}');
+            break;
+        }
+        
+        case 'dev.generateComments': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const language = typeof args.language === 'string' ? args.language : '';
+            const style = typeof args.style === 'string' ? args.style : 'detailed';
+            
+            lines.push(`Add ${style} comments to this ${language || ''} code:`);
+            lines.push('```');
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            lines.push('Include header comments and inline explanations. Return: {"commentedCode":"..."}');
+            break;
+        }
+        
+        case 'dev.refactorCode': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const goal = typeof args.goal === 'string' ? args.goal : 'improve readability';
+            
+            lines.push(`Refactor this code to ${goal}:`);
+            lines.push('```');
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            lines.push('Return: {"refactored":"...", "diff":"optional diff showing changes"}');
+            break;
+        }
+        
+        case 'dev.extractInterface': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const target = typeof args.target === 'string' ? args.target : 'TypeScript';
+            
+            lines.push(`Extract a ${target} interface/type from this implementation:`);
+            lines.push('```');
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            lines.push('Return: {"interface":"..."}');
+            break;
+        }
+        
+        case 'dev.generateTests': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const framework = typeof args.framework === 'string' ? args.framework : 'jest';
+            const language = typeof args.language === 'string' ? args.language : '';
+            
+            lines.push(`Generate ${framework} unit tests for this ${language || ''} code:`);
+            lines.push('```');
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            lines.push('Include edge cases and assertions. Return: {"tests":"..."}');
+            break;
+        }
+        
+        case 'dev.translateCode': {
+            const content = typeof args.content === 'string' ? args.content : '';
+            const targetLanguage = typeof args.targetLanguage === 'string' ? args.targetLanguage : '';
+            const includeNotes = args.notes === true;
+            
+            lines.push(`Translate this code to ${targetLanguage}:`);
+            lines.push('```');
+            lines.push(content.slice(0, 3000));
+            lines.push('```');
+            lines.push('');
+            if (includeNotes) {
+                lines.push('Include notes about any non-trivial translations. Return: {"translated":"...", "notes":"..."}');
+            } else {
+                lines.push('Return: {"translated":"..."}');
+            }
+            break;
+        }
+        
+        default: {
+            // 通用處理：使用 mcp.json 的 description 或構造基本請求
+            const desc = toolDescription?.trim();
+            if (desc) {
+                lines.push(desc);
+            } else {
+                lines.push(`Execute tool "${toolName}" with the provided parameters.`);
+            }
+            lines.push('');
+            lines.push('Parameters:');
+            lines.push(JSON.stringify(args ?? {}, null, 2));
+            lines.push('');
+            
+            // 使用 mcp.json 定義的 outputSchema（如果有）
+            if (outputSchema) {
+                const schemaStr = typeof outputSchema === 'string' 
+                    ? outputSchema 
+                    : JSON.stringify(outputSchema, null, 2);
+                lines.push('Return a JSON object matching this schema:');
+                lines.push(schemaStr);
+            } else {
+                lines.push('Return the result as a JSON object.');
+            }
+            break;
+        }
     }
-
-    return sections.join('\n\n');
-}
-
-// Legacy alias for backward compatibility (if needed elsewhere)
-function buildPromptFallback(toolName: string, args: Record<string, unknown>, toolDescription?: string) {
-    return buildToolExecutionPrompt(toolName, args, toolDescription);
+    
+    // 通用的輸出格式提醒
+    lines.push('');
+    lines.push('IMPORTANT: Return ONLY valid JSON. No markdown formatting, no extra text.');
+    
+    return lines.join('\n');
 }
 
 /**
