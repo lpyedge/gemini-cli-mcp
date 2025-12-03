@@ -331,13 +331,14 @@ function buildToolExecutionPrompt(
             const query = typeof args.query === 'string' ? args.query : '';
             const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 10;
             
-            lines.push(`Search the web for documentation and usage examples of the npm package "${pkg}".`);
-            if (query) lines.push(`Focus on: ${query}`);
+            lines.push(`Conduct a comprehensive web search for documentation, usage examples, and API references for the npm package "${pkg}".`);
+            if (query) lines.push(`Focus specifically on: ${query}`);
             lines.push('');
-            lines.push(`Find up to ${maxResults} relevant results including official docs, tutorials, and API references.`);
+            lines.push(`Retrieve up to ${maxResults} distinct and relevant results. For each result, provide a detailed summary explaining how it addresses the query.`);
+            lines.push('Do not just give a general overview of the package. I need specific details.');
             lines.push('');
-            lines.push('Return a JSON object like this:');
-            lines.push(`{"package":"${pkg}","matches":[{"title":"...", "summary":"...", "url":"https://...", "kind":"docs|example|api|tutorial"}]}`);
+            lines.push('Return a JSON object strictly following this structure:');
+            lines.push(`{"package":"${pkg}","matches":[{"title":"Page Title", "summary":"Detailed summary of the content...", "url":"https://...", "kind":"docs|example|api|tutorial"}]}`);
             break;
         }
         
@@ -346,13 +347,14 @@ function buildToolExecutionPrompt(
             const language = typeof args.language === 'string' ? args.language : '';
             const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 5;
             
-            lines.push(`Search the web for code examples that show how to: ${query}`);
+            lines.push(`Search the web for high-quality code examples that show how to: ${query}`);
             if (language) lines.push(`Preferred language: ${language}`);
             lines.push('');
-            lines.push(`Find up to ${maxResults} code examples from GitHub, StackOverflow, or documentation sites.`);
+            lines.push(`Find up to ${maxResults} complete and working code examples from GitHub, StackOverflow, or documentation sites.`);
+            lines.push('The snippets should be functional, well-commented, and directly applicable.');
             lines.push('');
-            lines.push('Return a JSON object like this:');
-            lines.push('{"results":[{"title":"...", "snippet":"// code here", "url":"https://...", "source":"GitHub|StackOverflow|..."}]}');
+            lines.push('Return a JSON object strictly following this structure:');
+            lines.push('{"results":[{"title":"Title", "snippet":"// Full code snippet here", "url":"https://...", "source":"GitHub|StackOverflow|..."}]}');
             break;
         }
         
@@ -361,17 +363,17 @@ function buildToolExecutionPrompt(
             const filePath = typeof args.path === 'string' ? args.path : '';
             
             if (filePath) {
-                lines.push(`Summarize the code in file: ${filePath}`);
+                lines.push(`Analyze and summarize the code in file: ${filePath}`);
             } else if (content) {
-                lines.push('Summarize this code:');
+                lines.push('Analyze and summarize this code:');
                 lines.push('```');
                 lines.push(content.slice(0, 3000)); // 限制長度
                 lines.push('```');
             }
             lines.push('');
-            lines.push('Provide a concise summary in 3-5 sentences covering the main purpose and key functionality.');
+            lines.push('Provide a comprehensive summary describing the logic, key functions, and overall purpose in detail.');
             lines.push('');
-            lines.push('Return: {"summary":"..."}');
+            lines.push('Return: {"summary":"Detailed summary text..."}');
             break;
         }
         
@@ -379,12 +381,13 @@ function buildToolExecutionPrompt(
             const content = typeof args.content === 'string' ? args.content : '';
             const language = typeof args.language === 'string' ? args.language : '';
             
-            lines.push('Explain this code step by step:');
+            lines.push('Provide a detailed, step-by-step technical explanation of this code:');
             lines.push(`\`\`\`${language}`);
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
-            lines.push('Return: {"explanation":"..."}');
+            lines.push('Analyze the control flow, data structures, and key operations.');
+            lines.push('Return: {"explanation":"Detailed explanation..."}');
             break;
         }
         
@@ -393,12 +396,13 @@ function buildToolExecutionPrompt(
             const language = typeof args.language === 'string' ? args.language : '';
             const style = typeof args.style === 'string' ? args.style : 'detailed';
             
-            lines.push(`Add ${style} comments to this ${language || ''} code:`);
+            lines.push(`Add comprehensive ${style} documentation to this ${language || ''} code:`);
             lines.push('```');
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
-            lines.push('Include header comments and inline explanations. Return: {"commentedCode":"..."}');
+            lines.push('Include JSDoc/docstring headers for functions and classes, and detailed inline comments explaining complex logic.');
+            lines.push('Return: {"commentedCode":"Code with comments..."}');
             break;
         }
         
@@ -406,11 +410,12 @@ function buildToolExecutionPrompt(
             const content = typeof args.content === 'string' ? args.content : '';
             const goal = typeof args.goal === 'string' ? args.goal : 'improve readability';
             
-            lines.push(`Refactor this code to ${goal}:`);
+            lines.push(`Refactor this code to significantly ${goal}:`);
             lines.push('```');
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
+            lines.push('Ensure the code is production-ready, follows best practices, and handles edge cases.');
             lines.push('Return: {"refactored":"...", "diff":"optional diff showing changes"}');
             break;
         }
@@ -419,11 +424,12 @@ function buildToolExecutionPrompt(
             const content = typeof args.content === 'string' ? args.content : '';
             const target = typeof args.target === 'string' ? args.target : 'TypeScript';
             
-            lines.push(`Extract a ${target} interface/type from this implementation:`);
+            lines.push(`Analyze the implementation and extract a complete and precise ${target} interface/type definition:`);
             lines.push('```');
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
+            lines.push('Include all properties and methods inferred from usage.');
             lines.push('Return: {"interface":"..."}');
             break;
         }
@@ -433,12 +439,13 @@ function buildToolExecutionPrompt(
             const framework = typeof args.framework === 'string' ? args.framework : 'jest';
             const language = typeof args.language === 'string' ? args.language : '';
             
-            lines.push(`Generate ${framework} unit tests for this ${language || ''} code:`);
+            lines.push(`Generate a comprehensive suite of ${framework} unit tests for this ${language || ''} code:`);
             lines.push('```');
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
-            lines.push('Include edge cases and assertions. Return: {"tests":"..."}');
+            lines.push('Cover happy paths, edge cases, and error conditions.');
+            lines.push('Return: {"tests":"..."}');
             break;
         }
         
@@ -447,11 +454,12 @@ function buildToolExecutionPrompt(
             const targetLanguage = typeof args.targetLanguage === 'string' ? args.targetLanguage : '';
             const includeNotes = args.notes === true;
             
-            lines.push(`Translate this code to ${targetLanguage}:`);
+            lines.push(`Translate this code to ${targetLanguage} with high fidelity:`);
             lines.push('```');
             lines.push(content.slice(0, 3000));
             lines.push('```');
             lines.push('');
+            lines.push('Ensure idiomatic usage of the target language while preserving the original logic.');
             if (includeNotes) {
                 lines.push('Include notes about any non-trivial translations. Return: {"translated":"...", "notes":"..."}');
             } else {
@@ -489,7 +497,10 @@ function buildToolExecutionPrompt(
     
     // 通用的輸出格式提醒
     lines.push('');
-    lines.push('IMPORTANT: Return ONLY valid JSON. No markdown formatting, no extra text.');
+    lines.push('IMPORTANT OUTPUT RULES:');
+    lines.push('1. Return ONLY a valid JSON object.');
+    lines.push('2. Do not include any conversational text, explanations, or markdown formatting outside the JSON.');
+    lines.push('3. Ensure the content is detailed, accurate, and directly addresses the prompt.');
     
     return lines.join('\n');
 }
